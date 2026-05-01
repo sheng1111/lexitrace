@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LexiTrace Lookup Screenshot</title>
+    <style>
+      :root {
+        color: #1f2933;
+        background: #eef6ff;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body { margin: 0; }
+      .page {
+        width: 1280px;
+        height: 800px;
+        display: grid;
+        grid-template-columns: 300px 1fr 260px;
+        gap: 28px;
+        padding: 48px;
+        box-sizing: border-box;
+      }
+      .nav, .side {
+        border: 1px solid #d8dee8;
+        border-radius: 8px;
+        background: rgba(255,255,255,.86);
+        padding: 22px;
+      }
+      .nav h2, .side h2 { margin: 0 0 16px; font-size: 15px; }
+      .nav p, .side p { margin: 10px 0; color: #667085; font-size: 14px; }
+      .article {
+        position: relative;
+        border: 1px solid #d8dee8;
+        border-radius: 8px;
+        background: #fff;
+        padding: 44px 56px;
+        box-shadow: 0 18px 60px rgba(15,23,42,.08);
+      }
+      .article h1 { margin: 0 0 24px; font-size: 30px; }
+      .article p { margin: 0 0 24px; font-size: 22px; line-height: 1.7; }
+      .selected { background: #bfdbfe; border-radius: 3px; padding: 0 2px; }
+      .popup {
+        position: absolute;
+        left: 318px;
+        top: 150px;
+        width: 440px;
+        border: 1px solid #d9dee7;
+        border-radius: 8px;
+        background: #fff;
+        padding: 16px;
+        box-shadow: 0 16px 48px rgba(15,23,42,.16);
+      }
+      .popup h2 { margin: 0; font-size: 20px; }
+      .meta { margin-top: 2px; color: #687385; font-size: 13px; }
+      .label { margin: 14px 0 4px; color: #687385; font-size: 12px; font-weight: 650; }
+      .text { margin: 0; font-size: 14px; line-height: 1.5; }
+      .sentence { margin: 0; border-radius: 6px; background: #f6f7f9; padding: 8px 10px; color: #334155; font-size: 13px; }
+      .badges { display: flex; gap: 6px; margin-top: 10px; }
+      .badge { border: 1px solid #d9dee7; border-radius: 999px; padding: 3px 8px; background: #f8fafc; color: #475569; font-size: 12px; }
+      .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+      .button { border: 1px solid #cfd6e2; border-radius: 6px; padding: 7px 12px; background: #fff; font-size: 13px; }
+      .primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <aside class="nav">
+        <h2>閱讀目錄</h2>
+        <p>Workplace English</p>
+        <p>Technical Docs</p>
+        <p>Business Updates</p>
+      </aside>
+      <article class="article">
+        <h1>Read English First, Learn Quietly</h1>
+        <p>Because most people go about changing their reading habits in the wrong way, they often rely on full-page translation.</p>
+        <p>LexiTrace helps you keep the original context while learning words like <span class="selected">resolution</span>, requirement, and mitigate.</p>
+        <p>Saved words leave subtle traces on the page and come back later as recall prompts.</p>
+        <section class="popup">
+          <h2>resolution</h2>
+          <div class="meta">noun</div>
+          <div class="label">繁體中文意思</div>
+          <p class="text">決心；新年目標；下定決心要做的事</p>
+          <div class="label">英文提示</div>
+          <p class="text">A firm decision to do or not to do something.</p>
+          <div class="label">來源句子</div>
+          <p class="sentence">LexiTrace helps you keep context while learning words like resolution.</p>
+          <div class="badges"><span class="badge">多益：中</span><span class="badge">情境：一般</span></div>
+          <div class="actions"><span class="button">我懂了</span><span class="button primary">儲存</span></div>
+        </section>
+      </article>
+      <aside class="side">
+        <h2>LexiTrace 詞跡</h2>
+        <p>Contextual lookup</p>
+        <p>Local-first history</p>
+        <p>Passive review</p>
+      </aside>
+    </main>
+  </body>
+</html>

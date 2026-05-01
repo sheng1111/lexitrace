@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LexiTrace Invisible Review Screenshot</title>
+    <style>
+      :root { color: #1f2933; background: #f5f7fb; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; }
+      .page { width: 1280px; height: 800px; display: grid; grid-template-columns: 1fr 320px; gap: 28px; padding: 52px; box-sizing: border-box; }
+      .article { position: relative; border: 1px solid #d8dee8; border-radius: 8px; background: #fff; padding: 48px 64px; box-shadow: 0 18px 60px rgba(15,23,42,.08); }
+      h1 { margin: 0 0 28px; font-size: 32px; }
+      p { margin: 0 0 24px; font-size: 23px; line-height: 1.75; }
+      .highlight-new { background: rgba(244,196,48,.34); border-radius: 3px; padding: 0 2px; }
+      .highlight-learning { text-decoration: underline solid rgba(37,99,235,.45); text-underline-offset: 3px; }
+      .panel { border: 1px solid #d8dee8; border-radius: 8px; background: #fff; padding: 22px; height: max-content; }
+      .panel h2 { margin: 0 0 14px; font-size: 18px; }
+      .item { display: flex; justify-content: space-between; border-top: 1px solid #eef1f5; padding: 10px 0; color: #667085; font-size: 14px; }
+      .prompt { position: absolute; left: 36px; bottom: 34px; width: 340px; border: 1px solid #d9dee7; border-radius: 8px; background: #fff; padding: 14px; box-shadow: 0 10px 30px rgba(15,23,42,.14); }
+      .eyebrow { margin: 0 0 4px; color: #687385; font-size: 12px; font-weight: 650; }
+      .word { margin: 0; font-size: 22px; font-weight: 700; }
+      .copy { margin: 8px 0 0; font-size: 14px; line-height: 1.5; }
+      .sentence { margin: 10px 0 0; border-radius: 6px; padding: 8px 9px; background: #f6f7f9; color: #475569; font-size: 13px; }
+      .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+      .button { border: 1px solid #cfd6e2; border-radius: 6px; padding: 7px 12px; background: #fff; font-size: 13px; }
+      .primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <article class="article">
+        <h1>Passive Review While Reading</h1>
+        <p>Saved words stay visible as subtle traces, not as interruptions. When a word appears again, LexiTrace asks you to recall it first.</p>
+        <p>The team introduced measures to <span class="highlight-new">mitigate</span> risk, clarify requirements, and improve the release schedule.</p>
+        <p>Repeated exposure helps vocabulary become familiar through real reading instead of isolated memorization.</p>
+        <section class="prompt">
+          <p class="eyebrow">順手回想一下</p>
+          <h2 class="word">mitigate</h2>
+          <p class="copy">這個詞又出現在頁面裡。先想意思，再看答案。</p>
+          <p class="sentence">The team introduced measures to mitigate risk, clarify requirements, and improve the release schedule.</p>
+          <div class="actions"><span class="button">稍後</span><span class="button primary">看答案</span></div>
+        </section>
+      </article>
+      <aside class="panel">
+        <h2>本頁單字</h2>
+        <div class="item"><span>mitigate</span><span>待回想</span></div>
+        <div class="item"><span>requirement</span><span>學習中</span></div>
+        <div class="item"><span>schedule</span><span>漸熟</span></div>
+      </aside>
+    </main>
+  </body>
+</html>
