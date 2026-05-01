@@ -196,6 +196,10 @@ OAuth troubleshooting:
 - Google Sheet sync writes vocabulary records to a spreadsheet owned by the user.
 - No API secret is bundled into the extension.
 
+Privacy policy:
+
+- [PRIVACY.md](./PRIVACY.md)
+
 ## Chrome Web Store Publishing
 
 Before publishing:

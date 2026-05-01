@@ -25,7 +25,7 @@
     "type": "module"
   },
   "options_page": "options/index.html",
-  "permissions": ["storage", "activeTab", "scripting", "identity"],
+  "permissions": ["storage", "identity"],
   "host_permissions": [
     "https://sheets.googleapis.com/*",
     "https://api.dictionaryapi.dev/*",
