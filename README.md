@@ -179,6 +179,14 @@ LEXITRACE_GOOGLE_OAUTH_CLIENT_ID=your-extension-oauth-client-id.apps.googleuserc
 
 The OAuth client ID is public by design. Do not put client secrets, service account keys, refresh tokens, or private API keys into the extension.
 
+OAuth troubleshooting:
+
+- The Google Cloud OAuth client type must be **Chrome Extension**.
+- The OAuth client must use the same extension ID as the installed build.
+- If the OAuth consent screen is in Testing, add your Google account under Test users.
+- Enable **Google Sheets API** in the same Google Cloud project as the OAuth client.
+- After changing scopes or client ID, rebuild the extension, reload it in `chrome://extensions`, and retry authorization.
+
 ## Privacy and Safety
 
 - Vocabulary is stored locally by default.

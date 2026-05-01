@@ -39,15 +39,15 @@ export async function enableGoogleSheetOAuthSync(): Promise<ExtensionSettings> {
   ensureOAuthClientConfigured();
 
   const token = await getAuthToken(true);
-  const spreadsheet = await createSpreadsheet(token);
-  await initializeVocabularySheet(token, spreadsheet.spreadsheetId);
+  const created = await createSpreadsheet(token);
+  await initializeVocabularySheet(created.token, created.spreadsheet.spreadsheetId);
 
   return updateSettings({
     googleSheetSyncEnabled: true,
     googleSheetAuthMode: "oauth",
-    googleSheetId: spreadsheet.spreadsheetId,
+    googleSheetId: created.spreadsheet.spreadsheetId,
     googleSheetName: SHEET_NAME,
-    googleSheetUrl: spreadsheet.spreadsheetUrl,
+    googleSheetUrl: created.spreadsheet.spreadsheetUrl,
     syncMode: "Manual",
     storageMode: "Google Sheet optional sync",
     lastSyncAt: new Date().toISOString()
@@ -75,25 +75,23 @@ export async function syncVocabularyToOAuthSheet(
     return { pushed: 0, failed: 0 };
   }
 
-  const token = await getAuthToken(false);
+  const initialToken = await getAuthToken(false);
   const values = [COLUMNS, ...savedRecords.map(recordToRow)];
-  const response = await fetch(
+  const { response } = await fetchGoogleApi(
+    initialToken,
     `https://sheets.googleapis.com/v4/spreadsheets/${settings.googleSheetId}/values/${encodeURIComponent(
       `${TAB_NAME}!A1`
     )}?valueInputOption=RAW`,
     {
       method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
       body: JSON.stringify({ values })
-    }
+    },
+    "同步 Google Sheet 失敗。"
   );
 
   if (!response.ok) {
     await markRecords(pendingRecords, "failed");
-    return { pushed: 0, failed: pendingRecords.length };
+    throw await createGoogleApiError(response, "同步 Google Sheet 失敗。");
   }
 
   await markRecords(pendingRecords, "synced");
@@ -125,60 +123,165 @@ async function getAuthToken(interactive: boolean): Promise<string> {
   });
 }
 
-async function createSpreadsheet(
-  token: string
-): Promise<{ spreadsheetId: string; spreadsheetUrl: string }> {
-  const response = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      properties: {
-        title: SHEET_NAME
-      },
-      sheets: [
-        {
-          properties: {
-            title: TAB_NAME
+async function createSpreadsheet(token: string): Promise<{
+  token: string;
+  spreadsheet: { spreadsheetId: string; spreadsheetUrl: string };
+}> {
+  const { response, token: nextToken } = await fetchGoogleApi(
+    token,
+    "https://sheets.googleapis.com/v4/spreadsheets",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        properties: {
+          title: SHEET_NAME
+        },
+        sheets: [
+          {
+            properties: {
+              title: TAB_NAME
+            }
           }
-        }
-      ]
-    })
-  });
+        ]
+      })
+    },
+    "建立 Google Sheet 失敗。"
+  );
 
   if (!response.ok) {
-    throw new Error("建立 Google Sheet 失敗。");
+    throw await createGoogleApiError(response, "建立 Google Sheet 失敗。");
   }
 
-  return response.json() as Promise<{
-    spreadsheetId: string;
-    spreadsheetUrl: string;
-  }>;
+  return {
+    token: nextToken,
+    spreadsheet: (await response.json()) as {
+      spreadsheetId: string;
+      spreadsheetUrl: string;
+    }
+  };
 }
 
 async function initializeVocabularySheet(
   token: string,
   spreadsheetId: string
 ): Promise<void> {
-  const response = await fetch(
+  const { response } = await fetchGoogleApi(
+    token,
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
       `${TAB_NAME}!A1`
     )}?valueInputOption=RAW`,
     {
       method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
       body: JSON.stringify({ values: [COLUMNS] })
-    }
+    },
+    "初始化 Google Sheet 欄位失敗。"
   );
 
   if (!response.ok) {
-    throw new Error("初始化 Google Sheet 欄位失敗。");
+    throw await createGoogleApiError(response, "初始化 Google Sheet 欄位失敗。");
   }
+}
+
+async function fetchGoogleApi(
+  token: string,
+  url: string,
+  init: RequestInit,
+  errorTitle: string
+): Promise<{ response: Response; token: string }> {
+  const response = await fetchWithToken(token, url, init);
+
+  if (response.status !== 401 && response.status !== 403) {
+    return { response, token };
+  }
+
+  await removeCachedAuthToken(token);
+  const refreshedToken = await getAuthToken(true);
+  const refreshedResponse = await fetchWithToken(refreshedToken, url, init);
+
+  if (!refreshedResponse.ok) {
+    throw await createGoogleApiError(refreshedResponse, errorTitle);
+  }
+
+  return { response: refreshedResponse, token: refreshedToken };
+}
+
+function fetchWithToken(
+  token: string,
+  url: string,
+  init: RequestInit
+): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    headers: {
+      ...init.headers,
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    }
+  });
+}
+
+async function removeCachedAuthToken(token: string): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.identity.removeCachedAuthToken({ token }, () => resolve());
+  });
+}
+
+async function createGoogleApiError(
+  response: Response,
+  fallbackMessage: string
+): Promise<Error> {
+  let apiMessage = "";
+  let reason = "";
+
+  try {
+    const body = (await response.json()) as {
+      error?: {
+        message?: string;
+        status?: string;
+        errors?: Array<{ reason?: string; message?: string }>;
+      };
+    };
+    apiMessage = body.error?.message ?? "";
+    reason =
+      body.error?.status ??
+      body.error?.errors?.map((item) => item.reason).filter(Boolean).join(", ") ??
+      "";
+  } catch {
+    try {
+      apiMessage = await response.text();
+    } catch {
+      apiMessage = "";
+    }
+  }
+
+  const hint = createTroubleshootingHint(response.status, `${apiMessage} ${reason}`);
+  const details = [fallbackMessage, `HTTP ${response.status}`, reason, apiMessage, hint]
+    .filter(Boolean)
+    .join(" ");
+
+  return new Error(details);
+}
+
+function createTroubleshootingHint(status: number, details: string): string {
+  const text = details.toLowerCase();
+
+  if (text.includes("api has not been used") || text.includes("disabled")) {
+    return "請到 Google Cloud Console 啟用 Google Sheets API，等待幾分鐘後重試。";
+  }
+
+  if (text.includes("insufficient authentication scopes")) {
+    return "請重新載入擴充功能，移除舊授權後再按一次啟用同步，讓 Chrome 重新要求 spreadsheets 和 drive.file 權限。";
+  }
+
+  if (text.includes("access blocked") || text.includes("not completed")) {
+    return "如果 OAuth consent screen 還在 Testing，請把目前登入的 Google 帳號加入 Test users。";
+  }
+
+  if (status === 401 || status === 403) {
+    return "請確認 OAuth client 類型是 Chrome Extension，且綁定的是目前安裝版本的 Extension ID。";
+  }
+
+  return "";
 }
 
 function recordToRow(record: VocabularyRecord): string[] {
