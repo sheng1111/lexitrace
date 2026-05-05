@@ -1,39 +1,10 @@
 import type { ContextType, ToeicUsefulness } from "../core/types";
 
-const TOEIC_HIGH = new Set([
-  "account",
-  "assign",
-  "available",
-  "benefit",
-  "budget",
-  "clarify",
-  "confirm",
-  "deadline",
-  "delay",
-  "estimate",
-  "invoice",
-  "mitigate",
-  "notify",
-  "policy",
-  "postpone",
-  "purchase",
-  "refund",
-  "schedule",
-  "shipment",
-  "sufficient"
-]);
+import toeicWords from "./toeic-words.json";
 
-const TOEIC_MEDIUM = new Set([
-  "constraint",
-  "feature",
-  "impact",
-  "improve",
-  "priority",
-  "requirement",
-  "resolve",
-  "update",
-  "verify"
-]);
+const TOEIC_HIGH = new Set(toeicWords.high);
+const TOEIC_MEDIUM = new Set(toeicWords.medium);
+const HIGH_FREQUENCY = new Set(toeicWords.highFrequency);
 
 const TECHNICAL_DOMAINS = [
   "developer.mozilla.org",
@@ -84,6 +55,10 @@ export function classifyToeicUsefulness(
   }
 
   if (TOEIC_MEDIUM.has(normalizedText)) {
+    return "Medium";
+  }
+
+  if (HIGH_FREQUENCY.has(normalizedText)) {
     return "Medium";
   }
 

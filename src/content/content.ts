@@ -6,6 +6,7 @@ import {
 import { t } from "../core/i18n";
 import { escapeRegExp, getDomain, normalizeText } from "../core/normalize";
 import { SETTINGS_KEY } from "../core/settings";
+import { getLookupForms } from "../dictionary/word-forms";
 import { extractSentenceAroundSelection } from "../core/sentence";
 import type {
   ExtensionSettings,
@@ -536,27 +537,33 @@ function findNextVocabularyMatch(
     | undefined;
 
   for (const record of records) {
-    const pattern = record.is_phrase
-      ? escapeRegExp(record.normalized_text)
-      : `\\b${escapeRegExp(record.normalized_text)}\\b`;
-    const match = new RegExp(pattern, "i").exec(text);
+    const variants = record.is_phrase
+      ? [record.normalized_text]
+      : getLookupForms(record.normalized_text);
 
-    if (!match || match.index < 0) {
-      continue;
-    }
+    for (const variant of variants) {
+      const pattern = record.is_phrase
+        ? escapeRegExp(variant)
+        : `\b${escapeRegExp(variant)}\b`;
+      const match = new RegExp(pattern, "i").exec(text);
 
-    const candidate = {
-      index: match.index,
-      text: match[0],
-      record
-    };
+      if (!match || match.index < 0) {
+        continue;
+      }
 
-    if (
-      !best ||
-      candidate.index < best.index ||
-      (candidate.index === best.index && candidate.text.length > best.text.length)
-    ) {
-      best = candidate;
+      const candidate = {
+        index: match.index,
+        text: match[0],
+        record
+      };
+
+      if (
+        !best ||
+        candidate.index < best.index ||
+        (candidate.index === best.index && candidate.text.length > best.text.length)
+      ) {
+        best = candidate;
+      }
     }
   }
 
