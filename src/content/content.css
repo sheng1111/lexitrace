@@ -252,6 +252,13 @@
   text-align: left;
 }
 
+
+.lexitrace-bubble__button--toeic {
+  background: linear-gradient(90deg, #fff7d6 0%, #ffedd5 100%);
+  color: #9a3412;
+  font-weight: 650;
+}
+
 .lexitrace-bubble__panel {
   border-top: 1px solid var(--lexitrace-border);
   padding: 10px 12px 12px;
