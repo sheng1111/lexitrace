@@ -23,6 +23,10 @@ let lookupPopup: HTMLElement | undefined;
 let recallPopup: HTMLElement | undefined;
 let pageBubble: HTMLElement | undefined;
 let reviewPrompt: HTMLElement | undefined;
+let hiddenHighlights = false;
+let bubbleReviewQueue: VocabularyRecord[] = [];
+let bubbleReviewIndex = 0;
+let bubbleReviewShowAnswer = false;
 let activeVocabulary: VocabularyRecord[] = [];
 let settings: ExtensionSettings | undefined;
 let uiHost: HTMLElement | undefined;
@@ -416,6 +420,7 @@ function appendManualEditSection(container: HTMLElement, lookup: LookupResult): 
 }
 
 async function refreshHighlights(): Promise<void> {
+  hiddenHighlights = false;
   clearHighlights();
   removePageBubble();
 
@@ -728,6 +733,10 @@ function renderPageBubble(
     button.textContent = `${button.textContent} · ${dueCount} ${t("dueReview")}`;
   }
 
+  if (pageVocabulary.some((record) => record.toeic_usefulness === "High")) {
+    button.classList.add("lexitrace-bubble__button--toeic");
+  }
+
   const panel = document.createElement("div");
   panel.className = "lexitrace-bubble__panel";
   panel.hidden = true;
@@ -752,17 +761,96 @@ function renderPageBubble(
 
   const hideButton = createButton(t("hideHighlights"));
   hideButton.addEventListener("click", () => {
+    hiddenHighlights = true;
     clearHighlights();
-    removePageBubble();
+    hideButton.disabled = true;
+    hideButton.textContent = t("highlightsHidden");
+  });
+
+  const quickRecallButton = createButton(t("quickRecall"), true);
+  quickRecallButton.addEventListener("click", () => {
+    startBubbleReview(pageVocabulary, false);
+  });
+
+  const quizButton = createButton(t("startQuiz"));
+  quizButton.addEventListener("click", () => {
+    startBubbleReview(pageVocabulary, true);
   });
 
   button.addEventListener("click", () => {
     panel.hidden = !panel.hidden;
   });
 
-  panel.append(title, list, hideButton);
+  panel.append(title, list, quickRecallButton, quizButton, hideButton);
   pageBubble.append(button, panel);
   appendToUiRoot(pageBubble);
+}
+
+
+function startBubbleReview(records: VocabularyRecord[], quizMode: boolean): void {
+  const reviewRecords = records.filter((record) => record.status !== "mastered" && record.status !== "ignored");
+  if (reviewRecords.length === 0) {
+    return;
+  }
+
+  bubbleReviewQueue = reviewRecords;
+  bubbleReviewIndex = 0;
+  bubbleReviewShowAnswer = !quizMode;
+  renderBubbleReviewCard(quizMode);
+}
+
+function renderBubbleReviewCard(quizMode: boolean): void {
+  const record = bubbleReviewQueue[bubbleReviewIndex];
+  if (!record) {
+    closePopups();
+    return;
+  }
+
+  closePopups();
+  const centerRect = new DOMRect(window.innerWidth / 2 - 120, window.innerHeight / 2 - 80, 240, 120);
+  recallPopup = createPopupShell(centerRect);
+  recallPopup.replaceChildren(
+    createTextElement("h2", "lexitrace-popup__title", `${t("reviewProgress", { current: bubbleReviewIndex + 1, total: bubbleReviewQueue.length })}`),
+    createTextElement("div", "lexitrace-popup__meta", record.text)
+  );
+
+  appendSection(recallPopup, t("recall"), bubbleReviewShowAnswer ? (record.meaning_zh || t("noSavedMeaning")) : t("reviewThinkFirst"));
+
+  const actions = document.createElement("div");
+  actions.className = "lexitrace-popup__actions";
+
+  if (!bubbleReviewShowAnswer) {
+    const showAnswerButton = createButton(t("showAnswer"), true);
+    showAnswerButton.addEventListener("click", () => {
+      bubbleReviewShowAnswer = true;
+      renderBubbleReviewCard(quizMode);
+    });
+    actions.append(showAnswerButton);
+  }
+
+  const unsureButton = createButton(t("unsure"));
+  unsureButton.addEventListener("click", () => {
+    void updateRecall(record.id, "unsure").catch(handleRuntimeFailure);
+    bubbleReviewIndex += 1;
+    bubbleReviewShowAnswer = !quizMode;
+    renderBubbleReviewCard(quizMode);
+  });
+
+  const rememberedButton = createButton(t("remembered"), true);
+  rememberedButton.addEventListener("click", () => {
+    void updateRecall(record.id, "remembered").catch(handleRuntimeFailure);
+    bubbleReviewIndex += 1;
+    bubbleReviewShowAnswer = !quizMode;
+    renderBubbleReviewCard(quizMode);
+  });
+
+  const closeButton = createButton(t("later"));
+  closeButton.addEventListener("click", closePopups);
+
+  actions.append(unsureButton, rememberedButton, closeButton);
+  recallPopup.append(actions);
+  appendToUiRoot(recallPopup);
+  positionPopupWithinViewport(recallPopup, centerRect);
 }
 
 function removePageBubble(): void {
