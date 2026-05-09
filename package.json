@@ -1,6 +1,6 @@
 {
   "name": "lexitrace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "license": "MIT",
   "description": "LexiTrace 詞跡 - lightweight contextual vocabulary lookup and passive review browser extension.",
