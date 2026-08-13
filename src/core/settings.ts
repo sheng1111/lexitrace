@@ -13,8 +13,6 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   disableInCodeBlocks: true,
   storageMode: "Local only",
   googleSheetSyncEnabled: false,
-  googleSheetAuthMode: "oauth",
-  googleSheetEndpointUrl: "",
   syncMode: "Off",
   recallFirstPopupEnabled: true,
   quickReviewQuestionCount: 1,
@@ -26,10 +24,35 @@ export const SETTINGS_KEY = "lexitrace.settings";
 
 export async function getSettings(): Promise<ExtensionSettings> {
   const result = await chrome.storage.local.get(SETTINGS_KEY);
-  return {
+  const stored = (result[SETTINGS_KEY] ?? {}) as Record<string, unknown>;
+  // Strip the retired endpoint-based sync settings once, then keep only OAuth state.
+  const {
+    googleSheetAuthMode: _legacyAuthMode,
+    googleSheetEndpointUrl: _legacyEndpointUrl,
+    ...currentSettings
+  } = stored;
+  const migratedSettings =
+    _legacyAuthMode === "apps_script"
+      ? {
+          ...currentSettings,
+          googleSheetSyncEnabled: false,
+          googleSheetId: undefined,
+          googleSheetName: undefined,
+          googleSheetUrl: undefined,
+          syncMode: "Off",
+          storageMode: "Local only"
+        }
+      : currentSettings;
+  const next = {
     ...DEFAULT_SETTINGS,
-    ...(result[SETTINGS_KEY] as Partial<ExtensionSettings> | undefined)
+    ...(migratedSettings as Partial<ExtensionSettings>)
   };
+
+  if (_legacyAuthMode !== undefined || _legacyEndpointUrl !== undefined) {
+    await chrome.storage.local.set({ [SETTINGS_KEY]: next });
+  }
+
+  return next;
 }
 
 export async function updateSettings(

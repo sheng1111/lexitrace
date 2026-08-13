@@ -955,6 +955,20 @@ Workplace
 
 Do not make this visually dominant.
 
+## 17.5 TOEIC Foundation Session
+
+The toolbar popup provides a short foundation path for learners who do not yet
+have a strong TOEIC vocabulary base:
+
+* Build a session from saved High or Medium TOEIC words plus Business and
+  TOEIC-like context words.
+* Prioritize due and weak words, then high-usefulness and low-accuracy words.
+* Keep each session to at most five words to lower the cost of starting.
+* Show a local attention count and cloze-quiz accuracy; no analytics upload is
+  required.
+* Keep recall-first behavior and show the TOEIC usefulness and context badges
+  during the session.
+
 ---
 
 # 18. Context Classification
@@ -1073,7 +1087,6 @@ context_type
 is_phrase
 is_ignored
 sync_status
-external_sheet_row_id
 ```
 
 ## 19.4 Page Record
@@ -1127,45 +1140,29 @@ Google Sheet sync provides a lightweight cross-device option without requiring t
 
 The product should remain fully usable without Google Sheet sync.
 
-## 20.2 Setup Options
+## 20.2 Setup
 
 The user should be able to configure Google Sheet sync in settings.
 
-Possible implementation approaches:
+Supported implementation:
 
-### Option A: Google OAuth
+### Google OAuth and Google Sheets API
 
 Pros:
 
 * Better user experience.
-* Can write directly to selected spreadsheet.
+* Uses the official Google Sheets API.
 * More standard long-term approach.
 * Can automatically create a dedicated spreadsheet for the user.
+* Can connect an existing LexiTrace spreadsheet on another device.
 
 Cons:
 
 * Requires Google Cloud project setup.
 * OAuth consent and permission handling.
-* More implementation complexity.
+* Requires careful token refresh and conflict handling.
 
-### Option B: Google Apps Script Web App URL
-
-Pros:
-
-* Lightweight.
-* User can paste an endpoint URL.
-* No full backend needed.
-* Easier for early MVP or personal tool.
-
-Cons:
-
-* Setup is more technical.
-* Security depends on the Apps Script deployment.
-* Error handling may be rougher.
-
-Recommended Phase 1 approach:
-
-> Use Google OAuth as the primary user flow. Keep Google Apps Script Web App URL as an advanced fallback for early testing or self-hosted workflows.
+Custom endpoint sync is not supported. Maintaining one official OAuth path keeps permissions, error handling, migration, and cross-device behavior understandable.
 
 Recommended user flow:
 
@@ -1199,7 +1196,8 @@ Last sync: 2026/05/01 23:42
 
 [Sync now]
 [Open Google Sheet]
-[Change sync spreadsheet]
+[Connect existing spreadsheet]
+[Create new sync spreadsheet]
 [Disable sync]
 ```
 
@@ -1211,7 +1209,6 @@ Google Sheet settings:
 sync_enabled
 sync_provider = google_sheet
 sync_mode = off | manual | auto
-google_sheet_endpoint_url
 google_sheet_id
 google_sheet_name
 google_sheet_url
@@ -1219,17 +1216,11 @@ google_sheet_tab_name
 last_sync_at
 ```
 
-For OAuth mode, the minimum required local settings after setup are:
+The minimum required local settings after setup are:
 
 ```text
 google_sheet_id
 google_sheet_url
-```
-
-For Apps Script URL fallback mode, the minimum required setting is:
-
-```text
-google_sheet_endpoint_url
 ```
 
 ## 20.4 Sync Modes
@@ -1248,14 +1239,13 @@ Behavior:
 Behavior:
 
 * User clicks Sync now.
-* Extension sends unsynced vocabulary records to Google Sheet.
+* Extension reads the remote sheet, merges it with local data, and writes back one consistent snapshot.
 
 ### Auto
 
 Behavior:
 
-* Extension syncs new or updated vocabulary records periodically.
-* Sync should be debounced.
+* Extension schedules a durable, debounced sync after vocabulary changes.
 * Sync should not run too frequently.
 
 Recommended default after setup:
@@ -1308,43 +1298,26 @@ Sync status values:
 * pending
 * synced
 * failed
-* conflict
 
 ## 20.7 Conflict Handling
 
-Phase 1 can use simple last-write-wins.
+Sync uses deterministic last-write-wins:
 
-Recommended conflict rule:
-
+* Records are matched by normalized text and deduplicated across devices.
 * If local updated_at is newer than sheet updated_at, push local record.
-* If sheet updated_at is newer, pull sheet record only if pull sync is supported.
-
-MVP may be push-only.
-
-Recommended Phase 1 minimum:
-
-> Push local vocabulary records to Google Sheet. Do not require full bidirectional sync in the first version.
+* If sheet updated_at is newer, pull the sheet record.
+* If both versions changed since the last successful sync, count the merge as a resolved conflict and report it in settings.
+* If timestamps match but content differs, use a stable content tie-breaker so every device converges on the same version.
+* Do not overwrite a sheet whose identity columns cannot be recognized.
 
 ## 20.8 Cross-Device Behavior
 
-There are two levels:
-
-### Phase 1A: Export-style sync
-
-* Device A pushes vocabulary records to Google Sheet.
-* Google Sheet acts as readable backup.
-* Device B does not automatically import.
-
-### Phase 1B: Simple pull sync
-
-* Device B can connect to the same Google Sheet.
-* Device B can import existing vocabulary records.
-* Conflict rules remain simple.
-
-Recommended:
-
-* Implement Phase 1A first.
-* Add Phase 1B after local MVP is stable.
+* Device A can create the dedicated spreadsheet and sync vocabulary.
+* Device B can paste that spreadsheet URL or ID in settings.
+* Device B imports the existing vocabulary and writes back its newer local records.
+* Automatic mode polls the shared sheet every 15 minutes, debounces local changes for 30 seconds, and retries failures after 5 minutes.
+* Local edits made while a sync request is in flight remain pending and cannot be overwritten by the older snapshot.
+* Subsequent manual or automatic syncs converge both devices through the shared sheet.
 
 ## 20.9 Error Handling
 
@@ -1414,7 +1387,7 @@ Storage and sync:
 ```text
 Storage mode: Local only / Google Sheet optional sync
 Google Sheet sync enabled
-Google Sheet endpoint URL
+Google Sheet ID and URL
 Sync mode: Off / Manual / Auto
 Sync now
 Last sync time
@@ -1470,7 +1443,7 @@ By default:
 
 If enabled:
 
-* Only saved vocabulary records are sent to the configured Google Sheet endpoint.
+* Only saved vocabulary records are exchanged with the user-selected Google Sheet through the official Google Sheets API.
 * Full page content should not be sent.
 * Browsing history should not be sent.
 * User should clearly understand that data is being written to their configured Google Sheet.
@@ -1636,12 +1609,11 @@ Useful local metrics:
 * Context rule-based badge.
 * Highlight intensity by learning status.
 * CSV and JSON export.
-* Google Sheet OAuth sync, dedicated Sheet creation, push-only.
+* Google Sheet OAuth sync, dedicated Sheet creation, bidirectional merge, and existing-sheet connection.
 
 ## P2: Later
 
-* Google Sheet pull sync.
-* Google Sheet pull sync.
+* Cross-device sync hardening and richer recovery tools.
 * Advanced spaced repetition.
 * Lemmatization and word family matching.
 * Anki export.

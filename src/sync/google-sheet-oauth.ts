@@ -1,102 +1,148 @@
-import type { ExtensionSettings, VocabularyRecord } from "../core/types";
-import { updateSettings } from "../core/settings";
-import { listVocabulary, putVocabulary } from "../storage/db";
+import type {
+  ExtensionSettings,
+  GoogleSheetSyncResult,
+  VocabularyRecord
+} from "../core/types";
+import { getSettings, updateSettings } from "../core/settings";
+import {
+  listVocabulary,
+  reconcileSavedVocabularySnapshot,
+  setVocabularySyncStatus
+} from "../storage/db";
+import {
+  GOOGLE_SHEET_COLUMNS,
+  mergeVocabularySnapshots,
+  parseSheetValues,
+  recordsToSheetValues
+} from "./google-sheet-codec";
 
 const OAUTH_CLIENT_ID_PLACEHOLDER = "__REPLACE_WITH_GOOGLE_OAUTH_CLIENT_ID__";
 const SHEET_NAME = "LexiTrace Sync Data";
 const TAB_NAME = "Vocabulary";
+const VALUES_RANGE = `${TAB_NAME}!A1:ZZ`;
 
-const COLUMNS = [
-  "id",
-  "text",
-  "normalized_text",
-  "meaning_zh",
-  "meaning_en",
-  "source_sentence",
-  "page_title",
-  "page_url",
-  "domain",
-  "status",
-  "review_priority",
-  "next_review_at",
-  "last_reviewed_at",
-  "review_interval_days",
-  "ease_factor",
-  "toeic_usefulness",
-  "context_type",
-  "lookup_count",
-  "remember_count",
-  "forget_count",
-  "quiz_correct_count",
-  "quiz_wrong_count",
-  "created_at",
-  "updated_at",
-  "last_seen_at",
-  "note"
-];
+interface SpreadsheetMetadata {
+  spreadsheetId: string;
+  spreadsheetUrl: string;
+  properties?: { title?: string };
+  sheets?: Array<{ properties?: { title?: string } }>;
+}
 
 export async function enableGoogleSheetOAuthSync(): Promise<ExtensionSettings> {
   ensureOAuthClientConfigured();
 
+  const currentSettings = await getSettings();
   const token = await getAuthToken(true);
   const created = await createSpreadsheet(token);
   await initializeVocabularySheet(created.token, created.spreadsheet.spreadsheetId);
+  const next = await saveConnectedSheet(
+    created.spreadsheet,
+    preferredConnectedSyncMode(currentSettings)
+  );
+  await syncVocabularyToOAuthSheet(next);
+  return getSettings();
+}
 
-  return updateSettings({
-    googleSheetSyncEnabled: true,
-    googleSheetAuthMode: "oauth",
-    googleSheetId: created.spreadsheet.spreadsheetId,
-    googleSheetName: SHEET_NAME,
-    googleSheetUrl: created.spreadsheet.spreadsheetUrl,
-    syncMode: "Manual",
-    storageMode: "Google Sheet optional sync",
-    lastSyncAt: new Date().toISOString()
-  });
+export async function connectExistingGoogleSheet(
+  sheetUrlOrId: string
+): Promise<ExtensionSettings> {
+  ensureOAuthClientConfigured();
+  const currentSettings = await getSettings();
+  const spreadsheetId = extractSpreadsheetId(sheetUrlOrId);
+  const token = await getAuthToken(true);
+  const metadata = await getSpreadsheetMetadata(token, spreadsheetId);
+  await ensureVocabularySheet(token, metadata);
+  const next = await saveConnectedSheet(
+    metadata,
+    preferredConnectedSyncMode(currentSettings)
+  );
+  await syncVocabularyToOAuthSheet(next);
+  return getSettings();
 }
 
 export async function syncVocabularyToOAuthSheet(
-  settings: ExtensionSettings
-): Promise<{ pushed: number; failed: number }> {
+  settings: ExtensionSettings,
+  interactiveAuth = false
+): Promise<GoogleSheetSyncResult> {
   ensureOAuthClientConfigured();
 
-  if (!settings.googleSheetId) {
-    throw new Error("Google Sheet 尚未建立，請先啟用 Google Sheet 同步。");
+  if (!settings.googleSheetSyncEnabled || !settings.googleSheetId) {
+    throw new Error("Google Sheet 尚未連結，請先啟用或連結既有試算表。");
   }
 
-  const savedRecords = (await listVocabulary()).filter(
-    (record) => record.type === "saved" && !record.is_ignored
+  const localRecords = (await listVocabulary()).filter(
+    (record) => record.type === "saved"
   );
-  const pendingRecords = savedRecords.filter(
-    (record) =>
-      ["local_only", "pending", "failed"].includes(record.sync_status)
+  const pendingRecords = localRecords.filter(
+    (record) => record.sync_status !== "synced"
   );
 
-  if (pendingRecords.length === 0) {
-    return { pushed: 0, failed: 0 };
+  try {
+    const initialToken = await getAuthToken(interactiveAuth);
+    const remoteRead = await readRemoteSnapshot(
+      initialToken,
+      settings.googleSheetId
+    );
+    const remoteSnapshot = remoteRead.snapshot;
+
+    if (remoteSnapshot.invalidRows > 0) {
+      throw new Error(
+        `同步試算表有 ${remoteSnapshot.invalidRows} 列無法辨識。為避免資料遺失，請先修正或移除這些列。`
+      );
+    }
+
+    const merged = mergeVocabularySnapshots(
+      localRecords,
+      remoteSnapshot.records
+    );
+    const syncedRecords = merged.records.map((record) => ({
+      ...record,
+      sync_status: "synced" as const
+    }));
+
+    await writeRemoteSnapshot(
+      remoteRead.token,
+      settings.googleSheetId,
+      syncedRecords,
+      remoteSnapshot.dataRowCount
+    );
+    const pending = await reconcileSavedVocabularySnapshot(
+      syncedRecords,
+      localRecords
+    );
+    await updateSettings({
+      lastSyncAt: new Date().toISOString(),
+      lastSyncError: undefined
+    });
+
+    return {
+      pushed: merged.pushed,
+      pulled: merged.pulled,
+      conflicts: merged.conflicts,
+      pending,
+      failed: 0
+    };
+  } catch (error) {
+    await setVocabularySyncStatus(
+      pendingRecords.map((record) => record.id),
+      "failed"
+    );
+    const message = error instanceof Error ? error.message : "同步 Google Sheet 失敗。";
+    await updateSettings({ lastSyncError: message });
+    throw error;
+  }
+}
+
+export function extractSpreadsheetId(value: string): string {
+  const trimmed = value.trim();
+  const urlMatch = /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(trimmed);
+  const id = urlMatch?.[1] ?? trimmed;
+
+  if (!/^[a-zA-Z0-9_-]{20,}$/.test(id)) {
+    throw new Error("請貼上有效的 Google Sheet 網址或試算表 ID。");
   }
 
-  const initialToken = await getAuthToken(false);
-  const values = [COLUMNS, ...savedRecords.map(recordToRow)];
-  const { response } = await fetchGoogleApi(
-    initialToken,
-    `https://sheets.googleapis.com/v4/spreadsheets/${settings.googleSheetId}/values/${encodeURIComponent(
-      `${TAB_NAME}!A1`
-    )}?valueInputOption=RAW`,
-    {
-      method: "PUT",
-      body: JSON.stringify({ values })
-    },
-    "同步 Google Sheet 失敗。"
-  );
-
-  if (!response.ok) {
-    await markRecords(pendingRecords, "failed");
-    throw await createGoogleApiError(response, "同步 Google Sheet 失敗。");
-  }
-
-  await markRecords(pendingRecords, "synced");
-  await updateSettings({ lastSyncAt: new Date().toISOString() });
-  return { pushed: pendingRecords.length, failed: 0 };
+  return id;
 }
 
 function ensureOAuthClientConfigured(): void {
@@ -105,6 +151,29 @@ function ensureOAuthClientConfigured(): void {
   if (!oauth2?.client_id || oauth2.client_id === OAUTH_CLIENT_ID_PLACEHOLDER) {
     throw new Error("需要先在 manifest 設定 Google OAuth client ID。");
   }
+}
+
+async function saveConnectedSheet(
+  spreadsheet: SpreadsheetMetadata,
+  syncMode: ExtensionSettings["syncMode"]
+): Promise<ExtensionSettings> {
+  return updateSettings({
+    googleSheetSyncEnabled: true,
+    googleSheetId: spreadsheet.spreadsheetId,
+    googleSheetName: spreadsheet.properties?.title || SHEET_NAME,
+    googleSheetUrl:
+      spreadsheet.spreadsheetUrl ||
+      `https://docs.google.com/spreadsheets/d/${spreadsheet.spreadsheetId}/edit`,
+    syncMode,
+    storageMode: "Google Sheet optional sync",
+    lastSyncError: undefined
+  });
+}
+
+function preferredConnectedSyncMode(
+  settings: ExtensionSettings
+): ExtensionSettings["syncMode"] {
+  return settings.syncMode === "Auto" ? "Auto" : "Manual";
 }
 
 async function getAuthToken(interactive: boolean): Promise<string> {
@@ -125,7 +194,7 @@ async function getAuthToken(interactive: boolean): Promise<string> {
 
 async function createSpreadsheet(token: string): Promise<{
   token: string;
-  spreadsheet: { spreadsheetId: string; spreadsheetUrl: string };
+  spreadsheet: SpreadsheetMetadata;
 }> {
   const { response, token: nextToken } = await fetchGoogleApi(
     token,
@@ -133,16 +202,8 @@ async function createSpreadsheet(token: string): Promise<{
     {
       method: "POST",
       body: JSON.stringify({
-        properties: {
-          title: SHEET_NAME
-        },
-        sheets: [
-          {
-            properties: {
-              title: TAB_NAME
-            }
-          }
-        ]
+        properties: { title: SHEET_NAME },
+        sheets: [{ properties: { title: TAB_NAME } }]
       })
     },
     "建立 Google Sheet 失敗。"
@@ -154,11 +215,53 @@ async function createSpreadsheet(token: string): Promise<{
 
   return {
     token: nextToken,
-    spreadsheet: (await response.json()) as {
-      spreadsheetId: string;
-      spreadsheetUrl: string;
-    }
+    spreadsheet: (await response.json()) as SpreadsheetMetadata
   };
+}
+
+async function getSpreadsheetMetadata(
+  token: string,
+  spreadsheetId: string
+): Promise<SpreadsheetMetadata> {
+  const { response } = await fetchGoogleApi(
+    token,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,spreadsheetUrl,properties.title,sheets.properties.title`,
+    { method: "GET" },
+    "無法開啟指定的 Google Sheet。"
+  );
+
+  if (!response.ok) {
+    throw await createGoogleApiError(response, "無法開啟指定的 Google Sheet。");
+  }
+
+  return response.json() as Promise<SpreadsheetMetadata>;
+}
+
+async function ensureVocabularySheet(
+  token: string,
+  spreadsheet: SpreadsheetMetadata
+): Promise<void> {
+  const hasVocabularyTab = spreadsheet.sheets?.some(
+    (sheet) => sheet.properties?.title === TAB_NAME
+  );
+
+  if (!hasVocabularyTab) {
+    const { response } = await fetchGoogleApi(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheet.spreadsheetId}:batchUpdate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          requests: [{ addSheet: { properties: { title: TAB_NAME } } }]
+        })
+      },
+      "建立 Vocabulary 工作表失敗。"
+    );
+    if (!response.ok) {
+      throw await createGoogleApiError(response, "建立 Vocabulary 工作表失敗。");
+    }
+    await initializeVocabularySheet(token, spreadsheet.spreadsheetId);
+  }
 }
 
 async function initializeVocabularySheet(
@@ -167,12 +270,10 @@ async function initializeVocabularySheet(
 ): Promise<void> {
   const { response } = await fetchGoogleApi(
     token,
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
-      `${TAB_NAME}!A1`
-    )}?valueInputOption=RAW`,
+    valuesUpdateUrl(spreadsheetId),
     {
       method: "PUT",
-      body: JSON.stringify({ values: [COLUMNS] })
+      body: JSON.stringify({ values: [[...GOOGLE_SHEET_COLUMNS]] })
     },
     "初始化 Google Sheet 欄位失敗。"
   );
@@ -180,6 +281,68 @@ async function initializeVocabularySheet(
   if (!response.ok) {
     throw await createGoogleApiError(response, "初始化 Google Sheet 欄位失敗。");
   }
+}
+
+async function readRemoteSnapshot(
+  token: string,
+  spreadsheetId: string
+): Promise<{
+  snapshot: ReturnType<typeof parseSheetValues>;
+  token: string;
+}> {
+  const { response, token: nextToken } = await fetchGoogleApi(
+    token,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
+      VALUES_RANGE
+    )}?majorDimension=ROWS`,
+    { method: "GET" },
+    "讀取 Google Sheet 失敗。"
+  );
+
+  if (!response.ok) {
+    throw await createGoogleApiError(response, "讀取 Google Sheet 失敗。");
+  }
+
+  const body = (await response.json()) as { values?: unknown[][] };
+  return {
+    snapshot: parseSheetValues(body.values ?? []),
+    token: nextToken
+  };
+}
+
+async function writeRemoteSnapshot(
+  token: string,
+  spreadsheetId: string,
+  records: VocabularyRecord[],
+  previousDataRowCount: number
+): Promise<string> {
+  const values = recordsToSheetValues(records);
+  const staleRowCount = Math.max(0, previousDataRowCount - records.length);
+  for (let index = 0; index < staleRowCount; index += 1) {
+    values.push(GOOGLE_SHEET_COLUMNS.map(() => ""));
+  }
+
+  const { response, token: nextToken } = await fetchGoogleApi(
+    token,
+    valuesUpdateUrl(spreadsheetId),
+    {
+      method: "PUT",
+      body: JSON.stringify({ values })
+    },
+    "寫入 Google Sheet 失敗。"
+  );
+
+  if (!response.ok) {
+    throw await createGoogleApiError(response, "寫入 Google Sheet 失敗。");
+  }
+
+  return nextToken;
+}
+
+function valuesUpdateUrl(spreadsheetId: string): string {
+  return `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
+    `${TAB_NAME}!A1`
+  )}?valueInputOption=RAW`;
 }
 
 async function fetchGoogleApi(
@@ -195,7 +358,7 @@ async function fetchGoogleApi(
   }
 
   await removeCachedAuthToken(token);
-  const refreshedToken = await getAuthToken(true);
+  const refreshedToken = await getAuthToken(false);
   const refreshedResponse = await fetchWithToken(refreshedToken, url, init);
 
   if (!refreshedResponse.ok) {
@@ -238,7 +401,7 @@ async function createGoogleApiError(
       error?: {
         message?: string;
         status?: string;
-        errors?: Array<{ reason?: string; message?: string }>;
+        errors?: Array<{ reason?: string }>;
       };
     };
     apiMessage = body.error?.message ?? "";
@@ -255,11 +418,11 @@ async function createGoogleApiError(
   }
 
   const hint = createTroubleshootingHint(response.status, `${apiMessage} ${reason}`);
-  const details = [fallbackMessage, `HTTP ${response.status}`, reason, apiMessage, hint]
-    .filter(Boolean)
-    .join(" ");
-
-  return new Error(details);
+  return new Error(
+    [fallbackMessage, `HTTP ${response.status}`, reason, apiMessage, hint]
+      .filter(Boolean)
+      .join(" ")
+  );
 }
 
 function createTroubleshootingHint(status: number, details: string): string {
@@ -270,7 +433,7 @@ function createTroubleshootingHint(status: number, details: string): string {
   }
 
   if (text.includes("insufficient authentication scopes")) {
-    return "請重新載入擴充功能，移除舊授權後再按一次啟用同步，讓 Chrome 重新要求 spreadsheets 和 drive.file 權限。";
+    return "請重新載入擴充功能並重新授權 Google Sheets 權限。";
   }
 
   if (text.includes("access blocked") || text.includes("not completed")) {
@@ -278,53 +441,8 @@ function createTroubleshootingHint(status: number, details: string): string {
   }
 
   if (status === 401 || status === 403) {
-    return "請確認 OAuth client 類型是 Chrome Extension，且綁定的是目前安裝版本的 Extension ID。";
+    return "請確認 OAuth client 類型是 Chrome Extension，且綁定目前安裝版本的 Extension ID。";
   }
 
   return "";
-}
-
-function recordToRow(record: VocabularyRecord): string[] {
-  return [
-    record.id,
-    record.text,
-    record.normalized_text,
-    record.meaning_zh,
-    record.meaning_en ?? "",
-    record.source_sentence,
-    record.page_title,
-    record.page_url,
-    record.domain,
-    record.status,
-    String(record.review_priority),
-    record.next_review_at ?? "",
-    record.last_reviewed_at ?? "",
-    record.review_interval_days === undefined ? "" : String(record.review_interval_days),
-    record.ease_factor === undefined ? "" : String(record.ease_factor),
-    record.toeic_usefulness,
-    record.context_type,
-    String(record.lookup_count),
-    String(record.remember_count),
-    String(record.forget_count),
-    String(record.quiz_correct_count),
-    String(record.quiz_wrong_count),
-    record.created_at,
-    record.updated_at,
-    record.last_seen_at,
-    record.user_note ?? ""
-  ];
-}
-
-async function markRecords(
-  records: VocabularyRecord[],
-  syncStatus: VocabularyRecord["sync_status"]
-): Promise<void> {
-  await Promise.all(
-    records.map((record) =>
-      putVocabulary({
-        ...record,
-        sync_status: syncStatus
-      })
-    )
-  );
 }

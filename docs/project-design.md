@@ -89,7 +89,7 @@ The provider interface supports:
 
 Phase 1 uses ECDICT through jsDelivr CDN as the primary English-to-Chinese source, Free Dictionary API and Wiktapi/Wiktionary as structured definition sources, Datamuse as a semantic fallback, MyMemory as a free non-Google Traditional Chinese translation fallback only when dictionary Chinese meanings are missing, and a small local dictionary only as a final fallback.
 
-Lookup providers run in parallel with per-provider timeouts. This keeps the selection popup responsive even when one free API is slow. English words are normalized with `wink-lemmatizer` before provider lookup to improve plural, tense, and progressive form matching.
+Lookup providers run in parallel with per-provider timeouts. This keeps the selection popup responsive even when one free API is slow. English words use a small tested word-form module for common plural, tense, progressive, comparison, and irregular forms. Keeping this module local avoids shipping a multi-megabyte linguistic model into every page.
 
 Rejected provider patterns:
 
@@ -123,6 +123,6 @@ Passive page highlights require content scripts on visited pages. If the product
 
 Default behavior is local-only. The extension stores only selected vocabulary and limited source context. It does not upload full pages, browsing history, or page bodies.
 
-Google Sheet sync remains optional. The primary flow should use `chrome.identity.getAuthToken()` and Google Sheets API to create a dedicated user-owned spreadsheet. Apps Script URL sync is an advanced fallback, not the main user flow.
+Google Sheet sync remains optional and uses one supported path: `chrome.identity.getAuthToken()` with the official Google Sheets API. Users can create a dedicated user-owned spreadsheet or connect the same spreadsheet on another device. Sync reads both local and remote snapshots, applies deterministic last-write-wins conflict handling using `updated_at` plus a stable tie-breaker, and writes the merged snapshot back to both stores. Auto mode combines a 30-second local-change debounce, 15-minute remote polling, and a 5-minute failure retry.
 
 For Chrome Web Store release, the Google OAuth client ID is a public identifier embedded in `manifest.json`. It should be configured by the publisher at build time and bound to the production Chrome Web Store extension ID. No client secret, service account key, or long-lived token should be bundled.

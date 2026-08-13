@@ -4,20 +4,28 @@ import {
   type RuntimeResponseMap
 } from "../core/messages";
 import { t } from "../core/i18n";
-import { escapeRegExp, getDomain, normalizeText } from "../core/normalize";
+import { getDomain, normalizeText } from "../core/normalize";
 import { SETTINGS_KEY } from "../core/settings";
-import { getLookupForms } from "../dictionary/word-forms";
 import { extractSentenceAroundSelection } from "../core/sentence";
 import type {
   ExtensionSettings,
   LookupResult,
   VocabularyRecord
 } from "../core/types";
+import {
+  createClozeSentence,
+  createVocabularyMatcher,
+  findVocabularyMatches,
+  type VocabularyMatcher
+} from "./matching";
 import styles from "./content.css?inline";
 
 const ROOT_ATTRIBUTE = "data-lexitrace-root";
 const HIGHLIGHT_ATTRIBUTE = "data-lexitrace-highlight";
 const VOCABULARY_ID_ATTRIBUTE = "data-lexitrace-vocabulary-id";
+const REVIEW_PROMPT_LAST_SHOWN_KEY = "lexitrace.reviewPromptLastShownAt";
+const REVIEW_PROMPT_DISMISS_COUNT_KEY = "lexitrace.reviewPromptDismissCount";
+const REVIEW_PROMPT_COOLDOWN_MS = 30 * 60 * 1000;
 
 let lookupPopup: HTMLElement | undefined;
 let recallPopup: HTMLElement | undefined;
@@ -27,6 +35,13 @@ let hiddenHighlights = false;
 let bubbleReviewQueue: VocabularyRecord[] = [];
 let bubbleReviewIndex = 0;
 let bubbleReviewShowAnswer = false;
+let bubbleReviewMode: "recall" | "cloze" = "recall";
+let bubbleReviewAnswer:
+  | { selected: string; correct: boolean }
+  | undefined;
+let bubbleReviewRememberedCount = 0;
+let bubbleReviewOptions: string[] = [];
+let bubbleReviewSaving = false;
 let activeVocabulary: VocabularyRecord[] = [];
 let settings: ExtensionSettings | undefined;
 let uiHost: HTMLElement | undefined;
@@ -35,6 +50,13 @@ let lookupAnchorRect: DOMRect | undefined;
 let recallAnchorRect: DOMRect | undefined;
 let extensionContextActive = true;
 let reviewPromptScheduled = false;
+let lookupRequestVersion = 0;
+let highlightRefreshVersion = 0;
+let contentObserver: MutationObserver | undefined;
+let contentRefreshTimer: number | undefined;
+let suppressContentObserver = false;
+let lastPageScrollAt = 0;
+const exposedVocabularyIds = new Set<string>();
 
 void boot();
 
@@ -65,7 +87,10 @@ async function boot(): Promise<void> {
     document.addEventListener("keyup", handleSelectionEvent);
     document.addEventListener("keydown", handleKeydown);
     document.addEventListener("click", handleDocumentClick, true);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
     chrome.storage.onChanged.addListener(handleStorageChange);
+    startContentObserver();
 
     if (!settings.extensionEnabled) {
       return;
@@ -86,6 +111,7 @@ function handleStorageChange(
   }
 
   settings = changes[SETTINGS_KEY].newValue as ExtensionSettings;
+  startContentObserver();
   void refreshHighlights().catch(handleRuntimeFailure);
 }
 
@@ -132,6 +158,15 @@ function shutdownInvalidatedContext(): void {
   document.removeEventListener("keyup", handleSelectionEvent);
   document.removeEventListener("keydown", handleKeydown);
   document.removeEventListener("click", handleDocumentClick, true);
+  window.removeEventListener("resize", handleViewportChange);
+  window.removeEventListener("scroll", handleViewportChange, true);
+
+  contentObserver?.disconnect();
+  contentObserver = undefined;
+  if (contentRefreshTimer !== undefined) {
+    window.clearTimeout(contentRefreshTimer);
+    contentRefreshTimer = undefined;
+  }
 
   try {
     chrome.storage?.onChanged?.removeListener(handleStorageChange);
@@ -163,8 +198,12 @@ function injectStyles(): void {
   document.documentElement.append(uiHost);
 }
 
-function handleSelectionEvent(): void {
+function handleSelectionEvent(event: MouseEvent | KeyboardEvent): void {
   if (!extensionContextActive || !settings?.extensionEnabled) {
+    return;
+  }
+
+  if (uiHost && event.composedPath().includes(uiHost)) {
     return;
   }
 
@@ -183,7 +222,74 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape") {
     closePopups();
     closeReviewPrompt();
+    return;
   }
+
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+
+  const target = event.target;
+  const highlight = target instanceof HTMLElement
+    ? target.closest<HTMLElement>(`[${HIGHLIGHT_ATTRIBUTE}]`)
+    : null;
+  if (highlight) {
+    event.preventDefault();
+    openRecallPopup(highlight);
+  }
+}
+
+function handleViewportChange(event: Event): void {
+  if (uiHost && event.composedPath().includes(uiHost)) {
+    return;
+  }
+
+  if (event.type === "scroll") {
+    lastPageScrollAt = Date.now();
+  }
+  closePopups();
+}
+
+function startContentObserver(): void {
+  if (contentObserver || !document.body) {
+    return;
+  }
+
+  contentObserver = new MutationObserver((mutations) => {
+    if (
+      suppressContentObserver ||
+      hiddenHighlights ||
+      !settings?.extensionEnabled ||
+      !settings.highlightsEnabled ||
+      !mutations.some(hasRelevantTextMutation)
+    ) {
+      return;
+    }
+
+    if (contentRefreshTimer !== undefined) {
+      window.clearTimeout(contentRefreshTimer);
+    }
+    contentRefreshTimer = window.setTimeout(() => {
+      contentRefreshTimer = undefined;
+      void refreshHighlights().catch(handleRuntimeFailure);
+    }, 450);
+  });
+
+  contentObserver.observe(document.body, {
+    childList: true,
+    characterData: true,
+    subtree: true
+  });
+}
+
+function hasRelevantTextMutation(mutation: MutationRecord): boolean {
+  if (mutation.type === "characterData") {
+    return /[A-Za-z]/.test(mutation.target.nodeValue ?? "");
+  }
+
+  return [...mutation.addedNodes].some((node) =>
+    /[A-Za-z]/.test(node.textContent ?? "")
+  );
 }
 
 function handleDocumentClick(event: MouseEvent): void {
@@ -257,23 +363,24 @@ function isReasonableEnglishSelection(text: string): boolean {
 
 function isInsideBlockedElement(node: Node): boolean {
   const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  const blockedSelectors = [
+    `[${ROOT_ATTRIBUTE}]`,
+    "script",
+    "style",
+    "input",
+    "textarea",
+    "select",
+    "option",
+    "[contenteditable]:not([contenteditable='false'])",
+    "[role='textbox']"
+  ];
+
+  if (settings?.disableInCodeBlocks !== false) {
+    blockedSelectors.push("pre", "code");
+  }
 
   return Boolean(
-    element?.closest(
-      [
-        `[${ROOT_ATTRIBUTE}]`,
-        "script",
-        "style",
-        "input",
-        "textarea",
-        "select",
-        "option",
-        "pre",
-        "code",
-        "[contenteditable]",
-        "[role='textbox']"
-      ].join(",")
-    )
+    element?.closest(blockedSelectors.join(","))
   );
 }
 
@@ -284,10 +391,14 @@ async function showLookupPopup(payload: {
   rect: DOMRect;
 }): Promise<void> {
   closePopups();
+  const requestVersion = ++lookupRequestVersion;
 
   lookupAnchorRect = payload.rect;
   lookupPopup = createPopupShell(payload.rect);
-  lookupPopup.append(createTextElement("p", "lexitrace-popup__text", t("lookingUp")));
+  lookupPopup.setAttribute("aria-busy", "true");
+  lookupPopup.append(
+    createTextElement("p", "lexitrace-popup__loading", t("lookingUp"))
+  );
   appendToUiRoot(lookupPopup);
   positionPopupWithinViewport(lookupPopup, payload.rect);
 
@@ -303,6 +414,10 @@ async function showLookupPopup(payload: {
     }
   });
 
+  if (requestVersion !== lookupRequestVersion || !lookupPopup) {
+    return;
+  }
+
   renderLookupPopup(lookup);
 }
 
@@ -311,13 +426,16 @@ function renderLookupPopup(lookup: LookupResult): void {
     return;
   }
 
+  lookupPopup.removeAttribute("aria-busy");
   lookupPopup.replaceChildren();
 
   const title = createTextElement("h2", "lexitrace-popup__title", lookup.selectedText);
   const meta = createTextElement(
     "div",
     "lexitrace-popup__meta",
-    lookup.partOfSpeech ?? t("dictionaryLookup")
+    [lookup.partOfSpeech ?? t("dictionaryLookup"), lookup.pronunciation]
+      .filter(Boolean)
+      .join(" · ")
   );
   lookupPopup.append(title, meta);
 
@@ -338,6 +456,10 @@ function renderLookupPopup(lookup: LookupResult): void {
   const actions = document.createElement("div");
   actions.className = "lexitrace-popup__actions";
 
+  if ("speechSynthesis" in window) {
+    actions.append(createSpeakButton(lookup.selectedText));
+  }
+
   if (lookup.externalUrl) {
     actions.append(createLinkButton(t("openDictionary"), lookup.externalUrl));
   }
@@ -354,7 +476,14 @@ function renderLookupPopup(lookup: LookupResult): void {
 
   actions.append(understoodButton, saveButton);
   lookupPopup.append(actions);
+  animateContentChange(lookupPopup);
   positionPopupWithinViewport(lookupPopup, lookupAnchorRect);
+
+  if (settings?.defaultActionAfterLookup === "Save automatically") {
+    void saveLookup(lookup, "save").catch(handleRuntimeFailure);
+  } else if (settings?.defaultActionAfterLookup === "Understood automatically") {
+    void saveLookup(lookup, "understood").catch(handleRuntimeFailure);
+  }
 }
 
 async function saveLookup(
@@ -367,6 +496,15 @@ async function saveLookup(
   const hintInput = lookupPopup?.querySelector<HTMLTextAreaElement>(
     "[data-lexitrace-hint-input]"
   );
+  const noteInput = lookupPopup?.querySelector<HTMLTextAreaElement>(
+    "[data-lexitrace-note-input]"
+  );
+  const toeicSelect = lookupPopup?.querySelector<HTMLSelectElement>(
+    "[data-lexitrace-toeic-select]"
+  );
+  const contextSelect = lookupPopup?.querySelector<HTMLSelectElement>(
+    "[data-lexitrace-context-select]"
+  );
 
   await sendMessage({
     type: "SAVE_VOCABULARY",
@@ -374,7 +512,10 @@ async function saveLookup(
       lookup,
       intent,
       manualMeaningZh: meaningInput?.value.trim() || undefined,
-      manualMeaningEn: hintInput?.value.trim() || undefined
+      manualMeaningEn: hintInput?.value.trim() || undefined,
+      userNote: noteInput?.value.trim() || undefined,
+      manualToeicUsefulness: toeicSelect?.value as LookupResult["toeicUsefulness"] | undefined,
+      manualContextType: contextSelect?.value as LookupResult["contextType"] | undefined
     }
   });
 
@@ -415,62 +556,167 @@ function appendManualEditSection(container: HTMLElement, lookup: LookupResult): 
   hintInput.value = lookup.meaningEn ?? "";
   hintLabel.append(hintHelp, hintInput);
 
-  details.append(summary, meaningLabel, hintLabel);
+  const noteLabel = document.createElement("label");
+  noteLabel.className = "lexitrace-field";
+  noteLabel.textContent = t("noteEditLabel");
+  const noteHelp = createTextElement("span", "lexitrace-field__help", t("noteEditHelp"));
+  const noteInput = document.createElement("textarea");
+  noteInput.className = "lexitrace-input";
+  noteInput.dataset.lexitraceNoteInput = "true";
+  noteLabel.append(noteHelp, noteInput);
+
+  const classification = document.createElement("div");
+  classification.className = "lexitrace-classification";
+  classification.append(
+    createLookupSelect(
+      t("toeicUsefulnessLabel"),
+      "lexitraceToeicSelect",
+      lookup.toeicUsefulness,
+      ["High", "Medium", "Low", "Unknown"],
+      (value) => translateUsefulness(value as LookupResult["toeicUsefulness"])
+    ),
+    createLookupSelect(
+      t("contextTypeLabel"),
+      "lexitraceContextSelect",
+      lookup.contextType,
+      ["Technical", "Business", "General", "TOEIC-like", "Unknown"],
+      (value) => translateContext(value as LookupResult["contextType"])
+    )
+  );
+
+  details.append(summary, meaningLabel, hintLabel, noteLabel, classification);
   container.append(details);
 }
 
+function createLookupSelect(
+  labelText: string,
+  dataKey: "lexitraceToeicSelect" | "lexitraceContextSelect",
+  selectedValue: string,
+  values: string[],
+  getLabel: (value: string) => string
+): HTMLLabelElement {
+  const label = document.createElement("label");
+  label.className = "lexitrace-field";
+  label.textContent = labelText;
+  const select = document.createElement("select");
+  select.className = "lexitrace-select";
+  select.dataset[dataKey] = "true";
+
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = getLabel(value);
+    option.selected = value === selectedValue;
+    select.append(option);
+  }
+
+  label.append(select);
+  return label;
+}
+
 async function refreshHighlights(): Promise<void> {
-  hiddenHighlights = false;
-  clearHighlights();
-  removePageBubble();
+  const refreshVersion = ++highlightRefreshVersion;
+  suppressContentObserver = true;
 
-  settings = settings ?? (await sendMessage({ type: "GET_SETTINGS" }));
-  if (!settings.extensionEnabled || !settings.highlightsEnabled) {
-    return;
-  }
+  try {
+    clearHighlights();
 
-  activeVocabulary = (await sendMessage({ type: "LIST_ACTIVE_VOCABULARY" })).filter(
-    (record) => !settings?.hideMasteredWords || record.status !== "mastered"
-  );
-
-  const sortedVocabulary = [...activeVocabulary].sort(
-    (a, b) => b.normalized_text.length - a.normalized_text.length
-  );
-
-  if (sortedVocabulary.length === 0 || !document.body) {
-    return;
-  }
-
-  const textNodes = collectTextNodes(document.body);
-  let pageMatchCount = 0;
-  const matchedVocabularyIds = new Set<string>();
-
-  for (const node of textNodes) {
-    pageMatchCount += highlightTextNode(node, sortedVocabulary, matchedVocabularyIds);
-  }
-
-  if (pageMatchCount > 0) {
-    const pageVocabulary = activeVocabulary.filter((record) =>
-      matchedVocabularyIds.has(record.id)
-    );
-
-    if (settings.pageVocabularyBubbleEnabled) {
-      renderPageBubble(pageMatchCount, pageVocabulary);
+    settings = settings ?? (await sendMessage({ type: "GET_SETTINGS" }));
+    if (refreshVersion !== highlightRefreshVersion) {
+      return;
     }
 
-    schedulePassiveReviewPrompt(pageVocabulary);
-  }
+    if (!settings.extensionEnabled || !settings.highlightsEnabled) {
+      closePopups();
+      closeReviewPrompt();
+      removePageBubble();
+      return;
+    }
 
-  if (matchedVocabularyIds.size > 0) {
-    void sendMessage({
-      type: "RECORD_PAGE_EXPOSURES",
-      payload: { ids: [...matchedVocabularyIds] }
-    })
-      .then((records) => {
-        activeVocabulary = mergeVocabularyRecords(activeVocabulary, records);
+    if (hiddenHighlights) {
+      if (!settings.pageVocabularyBubbleEnabled) {
+        removePageBubble();
+      }
+      return;
+    }
+
+    removePageBubble();
+
+    activeVocabulary = (await sendMessage({ type: "LIST_ACTIVE_VOCABULARY" })).filter(
+      (record) => !settings?.hideMasteredWords || record.status !== "mastered"
+    );
+    if (refreshVersion !== highlightRefreshVersion) {
+      return;
+    }
+
+    const sortedVocabulary = [...activeVocabulary].sort(
+      (a, b) => b.normalized_text.length - a.normalized_text.length
+    );
+    const vocabularyMatcher = createVocabularyMatcher(sortedVocabulary);
+
+    if (sortedVocabulary.length === 0 || !document.body) {
+      return;
+    }
+
+    const textNodes = collectTextNodes(document.body);
+    let pageMatchCount = 0;
+    const matchedVocabularyIds = new Set<string>();
+
+    for (let index = 0; index < textNodes.length; index += 1) {
+      if (index > 0 && index % 120 === 0) {
+        await yieldToMainThread();
+        if (refreshVersion !== highlightRefreshVersion) {
+          return;
+        }
+      }
+
+      pageMatchCount += highlightTextNode(
+        textNodes[index],
+        vocabularyMatcher,
+        matchedVocabularyIds
+      );
+    }
+
+    if (pageMatchCount > 0) {
+      const pageVocabulary = activeVocabulary.filter((record) =>
+        matchedVocabularyIds.has(record.id)
+      );
+
+      if (settings.pageVocabularyBubbleEnabled) {
+        renderPageBubble(pageMatchCount, pageVocabulary);
+      }
+
+      void schedulePassiveReviewPrompt(pageVocabulary);
+    }
+
+    const newExposureIds = [...matchedVocabularyIds].filter(
+      (id) => !exposedVocabularyIds.has(id)
+    );
+
+    if (newExposureIds.length > 0) {
+      newExposureIds.forEach((id) => exposedVocabularyIds.add(id));
+      void sendMessage({
+        type: "RECORD_PAGE_EXPOSURES",
+        payload: { ids: newExposureIds }
       })
-      .catch(handleRuntimeFailure);
+        .then((records) => {
+          activeVocabulary = mergeVocabularyRecords(activeVocabulary, records);
+        })
+        .catch((error) => {
+          newExposureIds.forEach((id) => exposedVocabularyIds.delete(id));
+          handleRuntimeFailure(error);
+        });
+    }
+  } finally {
+    contentObserver?.takeRecords();
+    if (refreshVersion === highlightRefreshVersion) {
+      suppressContentObserver = false;
+    }
   }
+}
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function collectTextNodes(root: HTMLElement): Text[] {
@@ -494,92 +740,53 @@ function collectTextNodes(root: HTMLElement): Text[] {
 
 function highlightTextNode(
   node: Text,
-  records: VocabularyRecord[],
+  matcher: VocabularyMatcher,
   matchedVocabularyIds: Set<string>
 ): number {
   const text = node.nodeValue ?? "";
+  const matches = findVocabularyMatches(text, matcher);
+  if (matches.length === 0) {
+    return 0;
+  }
+
   const fragment = document.createDocumentFragment();
-  let remaining = text;
-  let count = 0;
+  let cursor = 0;
 
-  while (remaining.length > 0) {
-    const match = findNextVocabularyMatch(remaining, records);
-
-    if (!match) {
-      fragment.append(document.createTextNode(remaining));
-      break;
-    }
-
-    if (match.index > 0) {
-      fragment.append(document.createTextNode(remaining.slice(0, match.index)));
+  for (const match of matches) {
+    if (match.index > cursor) {
+      fragment.append(document.createTextNode(text.slice(cursor, match.index)));
     }
 
     const span = document.createElement("span");
     span.className = `lexitrace-highlight lexitrace-highlight--${match.record.status}`;
     span.setAttribute(HIGHLIGHT_ATTRIBUTE, "true");
     span.setAttribute(VOCABULARY_ID_ATTRIBUTE, match.record.id);
+    span.setAttribute("role", "button");
+    span.setAttribute("aria-label", t("recallWord", { word: match.text }));
+    span.tabIndex = 0;
     span.textContent = match.text;
     fragment.append(span);
     matchedVocabularyIds.add(match.record.id);
-
-    remaining = remaining.slice(match.index + match.text.length);
-    count += 1;
+    cursor = match.index + match.text.length;
   }
 
-  if (count > 0) {
-    node.replaceWith(fragment);
+  if (cursor < text.length) {
+    fragment.append(document.createTextNode(text.slice(cursor)));
   }
+  node.replaceWith(fragment);
 
-  return count;
-}
-
-function findNextVocabularyMatch(
-  text: string,
-  records: VocabularyRecord[]
-): { index: number; text: string; record: VocabularyRecord } | undefined {
-  let best:
-    | { index: number; text: string; record: VocabularyRecord }
-    | undefined;
-
-  for (const record of records) {
-    const variants = record.is_phrase
-      ? [record.normalized_text]
-      : getLookupForms(record.normalized_text);
-
-    for (const variant of variants) {
-      const pattern = record.is_phrase
-        ? escapeRegExp(variant)
-        : `\b${escapeRegExp(variant)}\b`;
-      const match = new RegExp(pattern, "i").exec(text);
-
-      if (!match || match.index < 0) {
-        continue;
-      }
-
-      const candidate = {
-        index: match.index,
-        text: match[0],
-        record
-      };
-
-      if (
-        !best ||
-        candidate.index < best.index ||
-        (candidate.index === best.index && candidate.text.length > best.text.length)
-      ) {
-        best = candidate;
-      }
-    }
-  }
-
-  return best;
+  return matches.length;
 }
 
 function clearHighlights(): void {
+  const parents = new Set<Node>();
   document.querySelectorAll<HTMLElement>(`[${HIGHLIGHT_ATTRIBUTE}]`).forEach((node) => {
+    if (node.parentNode) {
+      parents.add(node.parentNode);
+    }
     node.replaceWith(document.createTextNode(node.textContent ?? ""));
   });
-  document.body?.normalize();
+  parents.forEach((parent) => parent.normalize());
 }
 
 function openRecallPopup(highlight: HTMLElement): void {
@@ -593,16 +800,21 @@ function openRecallPopup(highlight: HTMLElement): void {
   closePopups();
   recallAnchorRect = highlight.getBoundingClientRect();
   recallPopup = createPopupShell(highlight.getBoundingClientRect());
+  const currentText = highlight.textContent ?? record.text;
+  const currentSentence = extractSentenceAroundSelection(
+    highlight.parentElement?.textContent ?? currentText,
+    currentText
+  );
   if (settings?.recallFirstPopupEnabled === false) {
-    renderRevealMode(record, highlight.textContent ?? record.text);
+    renderRevealMode(record, currentSentence, false);
   } else {
-    renderRecallMode(record, highlight.textContent ?? record.text);
+    renderRecallMode(record, currentSentence);
   }
   appendToUiRoot(recallPopup);
   positionPopupWithinViewport(recallPopup, recallAnchorRect);
 }
 
-function renderRecallMode(record: VocabularyRecord, currentText: string): void {
+function renderRecallMode(record: VocabularyRecord, currentSentence: string): void {
   if (!recallPopup) {
     return;
   }
@@ -643,17 +855,22 @@ function renderRecallMode(record: VocabularyRecord, currentText: string): void {
 
   const unsureButton = createButton(t("unsure"));
   unsureButton.addEventListener("click", () => {
-    void updateRecall(record.id, "unsure", () => renderRevealMode(record, currentText)).catch(
-      handleRuntimeFailure
-    );
+    void updateRecall(record.id, "unsure", (updatedRecord) =>
+      renderRevealMode(updatedRecord, currentSentence, true)
+    ).catch(handleRuntimeFailure);
   });
 
   actions.append(hintButton, rememberedButton, unsureButton);
   recallPopup.append(actions);
+  animateContentChange(recallPopup);
   positionPopupWithinViewport(recallPopup, recallAnchorRect);
 }
 
-function renderRevealMode(record: VocabularyRecord, currentText: string): void {
+function renderRevealMode(
+  record: VocabularyRecord,
+  currentSentence: string,
+  outcomeRecorded: boolean
+): void {
   if (!recallPopup) {
     return;
   }
@@ -666,44 +883,152 @@ function renderRevealMode(record: VocabularyRecord, currentText: string): void {
     appendSection(recallPopup, t("englishHint"), record.meaning_en);
   }
 
+  if (record.user_note) {
+    appendSection(recallPopup, t("personalNote"), record.user_note);
+  }
+
   appendSentenceSection(recallPopup, t("previousSentence"), record.source_sentence);
 
-  const currentSentence = extractSentenceAroundSelection(
-    document.body.innerText.slice(0, 4000),
-    currentText
-  );
   appendSentenceSection(recallPopup, t("currentSentence"), currentSentence);
+  appendSavedEditSection(recallPopup, record, currentSentence, outcomeRecorded);
 
   const actions = document.createElement("div");
   actions.className = "lexitrace-popup__actions";
 
-  const addReviewButton = createButton(t("addToReview"));
-  addReviewButton.addEventListener("click", closePopups);
+  if (outcomeRecorded) {
+    const continueButton = createButton(t("continueReading"), true);
+    continueButton.addEventListener("click", closePopups);
+    actions.append(continueButton);
+  } else {
+    const addReviewButton = createButton(t("addToReview"));
+    addReviewButton.addEventListener("click", () => {
+      void updateRecall(record.id, "unsure").catch(handleRuntimeFailure);
+    });
 
-  const understoodButton = createButton(t("understood"), true);
-  understoodButton.addEventListener("click", closePopups);
+    const understoodButton = createButton(t("understood"), true);
+    understoodButton.addEventListener("click", () => {
+      void updateRecall(record.id, "remembered").catch(handleRuntimeFailure);
+    });
 
-  actions.append(addReviewButton, understoodButton);
+    actions.append(addReviewButton, understoodButton);
+  }
   recallPopup.append(actions);
+  animateContentChange(recallPopup);
   positionPopupWithinViewport(recallPopup, recallAnchorRect);
+}
+
+function appendSavedEditSection(
+  container: HTMLElement,
+  record: VocabularyRecord,
+  currentSentence: string,
+  outcomeRecorded: boolean
+): void {
+  const details = document.createElement("details");
+  details.className = "lexitrace-details";
+  const summary = document.createElement("summary");
+  summary.textContent = t("editSavedWord");
+
+  const meaningLabel = document.createElement("label");
+  meaningLabel.className = "lexitrace-field";
+  meaningLabel.textContent = t("meaningEditLabel");
+  const meaningInput = document.createElement("textarea");
+  meaningInput.className = "lexitrace-input";
+  meaningInput.value = record.meaning_zh;
+  meaningLabel.append(meaningInput);
+
+  const hintLabel = document.createElement("label");
+  hintLabel.className = "lexitrace-field";
+  hintLabel.textContent = t("hintEditLabel");
+  const hintInput = document.createElement("textarea");
+  hintInput.className = "lexitrace-input";
+  hintInput.value = record.meaning_en ?? "";
+  hintLabel.append(hintInput);
+
+  const noteLabel = document.createElement("label");
+  noteLabel.className = "lexitrace-field";
+  noteLabel.textContent = t("noteEditLabel");
+  const noteInput = document.createElement("textarea");
+  noteInput.className = "lexitrace-input";
+  noteInput.value = record.user_note ?? "";
+  noteLabel.append(noteInput);
+
+  const classification = document.createElement("div");
+  classification.className = "lexitrace-classification";
+  classification.append(
+    createLookupSelect(
+      t("toeicUsefulnessLabel"),
+      "lexitraceToeicSelect",
+      record.toeic_usefulness,
+      ["High", "Medium", "Low", "Unknown"],
+      (value) => translateUsefulness(value as LookupResult["toeicUsefulness"])
+    ),
+    createLookupSelect(
+      t("contextTypeLabel"),
+      "lexitraceContextSelect",
+      record.context_type,
+      ["Technical", "Business", "General", "TOEIC-like", "Unknown"],
+      (value) => translateContext(value as LookupResult["contextType"])
+    )
+  );
+
+  const status = createTextElement("span", "lexitrace-field__status", "");
+  status.setAttribute("role", "status");
+  const actions = document.createElement("div");
+  actions.className = "lexitrace-popup__actions";
+  const saveButton = createButton(t("saveChanges"), true);
+  saveButton.addEventListener("click", async () => {
+    saveButton.disabled = true;
+    status.textContent = t("settingsSaving");
+    try {
+      const toeicSelect = details.querySelector<HTMLSelectElement>(
+        "[data-lexitrace-toeic-select]"
+      );
+      const contextSelect = details.querySelector<HTMLSelectElement>(
+        "[data-lexitrace-context-select]"
+      );
+      const updated = await sendMessage({
+        type: "UPDATE_VOCABULARY_DETAILS",
+        payload: {
+          id: record.id,
+          meaningZh: meaningInput.value.trim(),
+          meaningEn: hintInput.value.trim() || undefined,
+          userNote: noteInput.value.trim() || undefined,
+          toeicUsefulness: (toeicSelect?.value ?? record.toeic_usefulness) as VocabularyRecord["toeic_usefulness"],
+          contextType: (contextSelect?.value ?? record.context_type) as VocabularyRecord["context_type"]
+        }
+      });
+      activeVocabulary = activeVocabulary.map((item) =>
+        item.id === updated.id ? updated : item
+      );
+      renderRevealMode(updated, currentSentence, outcomeRecorded);
+    } catch (error) {
+      saveButton.disabled = false;
+      status.textContent = error instanceof Error ? error.message : t("settingsSaveFailed");
+    }
+  });
+  actions.append(status, saveButton);
+  details.append(summary, meaningLabel, hintLabel, noteLabel, classification, actions);
+  container.append(details);
 }
 
 async function updateRecall(
   id: string,
   outcome: "remembered" | "unsure",
-  afterUpdate?: () => void
+  afterUpdate?: (updatedRecord: VocabularyRecord) => void,
+  mode: "recall" | "quiz" = "recall"
 ): Promise<void> {
   const updatedRecord = await sendMessage({
     type: "RECORD_RECALL",
-    payload: { id, outcome }
+    payload: { id, outcome, mode }
   });
   activeVocabulary = activeVocabulary.map((record) =>
     record.id === updatedRecord.id ? updatedRecord : record
   );
 
   if (afterUpdate) {
-    afterUpdate();
+    afterUpdate(updatedRecord);
     await refreshHighlights();
+    startContentObserver();
     return;
   }
 
@@ -725,12 +1050,25 @@ function renderPageBubble(
   const button = document.createElement("button");
   button.className = "lexitrace-bubble__button";
   button.type = "button";
+  button.setAttribute("aria-expanded", "false");
   const uniqueCount = pageVocabulary.length || matchCount;
   const dueCount = getDueReviewRecords(pageVocabulary).length;
-  button.textContent =
-    uniqueCount === 1 ? t("oneWordToRecall") : t("savedWordsOnPage", { count: uniqueCount });
+  const buttonLabel = createTextElement(
+    "span",
+    "lexitrace-bubble__summary",
+    uniqueCount === 1
+      ? t("oneSavedWordOnPage")
+      : t("savedWordsOnPage", { count: uniqueCount })
+  );
+  button.append(buttonLabel);
   if (dueCount > 0) {
-    button.textContent = `${button.textContent} · ${dueCount} ${t("dueReview")}`;
+    button.append(
+      createTextElement(
+        "span",
+        "lexitrace-bubble__due",
+        t("dueReviewCount", { count: dueCount })
+      )
+    );
   }
 
   if (pageVocabulary.some((record) => record.toeic_usefulness === "High")) {
@@ -739,7 +1077,8 @@ function renderPageBubble(
 
   const panel = document.createElement("div");
   panel.className = "lexitrace-bubble__panel";
-  panel.hidden = true;
+  panel.setAttribute("aria-hidden", "true");
+  panel.inert = true;
 
   const title = createTextElement("p", "lexitrace-bubble__title", t("pageVocabulary"));
   const list = document.createElement("div");
@@ -778,87 +1117,360 @@ function renderPageBubble(
   });
 
   button.addEventListener("click", () => {
-    panel.hidden = !panel.hidden;
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!expanded));
+    panel.setAttribute("aria-hidden", String(expanded));
+    panel.inert = expanded;
+    pageBubble?.classList.toggle("lexitrace-bubble--expanded", !expanded);
   });
 
-  panel.append(title, list, quickRecallButton, quizButton, hideButton);
+  const actions = document.createElement("div");
+  actions.className = "lexitrace-bubble__actions";
+  actions.append(quickRecallButton, quizButton, hideButton);
+  panel.append(title, list, actions);
   pageBubble.append(button, panel);
   appendToUiRoot(pageBubble);
 }
 
 
 function startBubbleReview(records: VocabularyRecord[], quizMode: boolean): void {
-  const reviewRecords = records.filter((record) => record.status !== "mastered" && record.status !== "ignored");
+  const maximum = quizMode
+    ? settings?.pageReviewQuestionCount ?? 3
+    : settings?.quickReviewQuestionCount ?? 1;
+  const reviewRecords = [...records]
+    .filter((record) => record.status !== "mastered" && record.status !== "ignored")
+    .sort((a, b) => {
+      const dueDifference = Number(isReviewDue(b)) - Number(isReviewDue(a));
+      return dueDifference || b.review_priority - a.review_priority;
+    })
+    .slice(0, maximum);
   if (reviewRecords.length === 0) {
     return;
   }
 
+  closePopups();
   bubbleReviewQueue = reviewRecords;
   bubbleReviewIndex = 0;
-  bubbleReviewShowAnswer = !quizMode;
-  renderBubbleReviewCard(quizMode);
+  bubbleReviewMode = quizMode ? "cloze" : "recall";
+  bubbleReviewShowAnswer = false;
+  bubbleReviewAnswer = undefined;
+  bubbleReviewOptions = [];
+  bubbleReviewRememberedCount = 0;
+  bubbleReviewSaving = false;
+  renderBubbleReviewCard();
 }
 
-function renderBubbleReviewCard(quizMode: boolean): void {
+function renderBubbleReviewCard(): void {
   const record = bubbleReviewQueue[bubbleReviewIndex];
+  const centerRect = new DOMRect(
+    window.innerWidth / 2 - 180,
+    window.innerHeight / 2 - 120,
+    360,
+    240
+  );
+
+  if (!recallPopup) {
+    recallAnchorRect = centerRect;
+    recallPopup = createPopupShell(centerRect);
+    recallPopup.classList.add("lexitrace-popup--review");
+    appendToUiRoot(recallPopup);
+  }
+
   if (!record) {
-    closePopups();
+    renderBubbleReviewComplete();
     return;
   }
 
-  closePopups();
-  const centerRect = new DOMRect(window.innerWidth / 2 - 120, window.innerHeight / 2 - 80, 240, 120);
-  recallPopup = createPopupShell(centerRect);
   recallPopup.replaceChildren(
-    createTextElement("h2", "lexitrace-popup__title", `${t("reviewProgress", { current: bubbleReviewIndex + 1, total: bubbleReviewQueue.length })}`),
-    createTextElement("div", "lexitrace-popup__meta", record.text)
+    createTextElement(
+      "div",
+      "lexitrace-popup__progress",
+      t("reviewProgress", {
+        current: bubbleReviewIndex + 1,
+        total: bubbleReviewQueue.length
+      })
+    )
   );
 
-  appendSection(recallPopup, t("recall"), bubbleReviewShowAnswer ? (record.meaning_zh || t("noSavedMeaning")) : t("reviewThinkFirst"));
+  if (bubbleReviewMode === "cloze") {
+    renderClozeReviewCard(record);
+  } else {
+    renderRecallReviewCard(record);
+  }
+
+  animateContentChange(recallPopup);
+  positionPopupWithinViewport(recallPopup, centerRect);
+}
+
+function renderRecallReviewCard(record: VocabularyRecord): void {
+  if (!recallPopup) {
+    return;
+  }
+
+  recallPopup.append(
+    createTextElement("h2", "lexitrace-popup__review-word", record.text),
+    createTextElement(
+      "p",
+      "lexitrace-popup__review-instruction",
+      bubbleReviewShowAnswer ? t("checkYourRecall") : t("reviewThinkFirst")
+    )
+  );
+
+  if (record.source_sentence) {
+    appendSentenceSection(
+      recallPopup,
+      t("sourceSentence"),
+      createClozeSentence(record.source_sentence, record.text)
+    );
+  }
 
   const actions = document.createElement("div");
   actions.className = "lexitrace-popup__actions";
 
   if (!bubbleReviewShowAnswer) {
+    const laterButton = createButton(t("later"));
+    laterButton.addEventListener("click", closePopups);
     const showAnswerButton = createButton(t("showAnswer"), true);
     showAnswerButton.addEventListener("click", () => {
       bubbleReviewShowAnswer = true;
-      renderBubbleReviewCard(quizMode);
+      renderBubbleReviewCard();
     });
-    actions.append(showAnswerButton);
+    actions.append(laterButton, showAnswerButton);
+  } else {
+    appendSection(recallPopup, t("meaning"), record.meaning_zh || t("noSavedMeaning"));
+    if (record.meaning_en) {
+      appendSection(recallPopup, t("englishHint"), record.meaning_en);
+    }
+
+    const unsureButton = createButton(t("unsure"));
+    unsureButton.disabled = bubbleReviewSaving;
+    unsureButton.addEventListener("click", () => {
+      void submitBubbleRecall(record, "unsure");
+    });
+    const rememberedButton = createButton(t("remembered"), true);
+    rememberedButton.disabled = bubbleReviewSaving;
+    rememberedButton.addEventListener("click", () => {
+      void submitBubbleRecall(record, "remembered");
+    });
+    actions.append(unsureButton, rememberedButton);
   }
 
-  const unsureButton = createButton(t("unsure"));
-  unsureButton.addEventListener("click", () => {
-    void updateRecall(record.id, "unsure").catch(handleRuntimeFailure);
-    bubbleReviewIndex += 1;
-    bubbleReviewShowAnswer = !quizMode;
-    renderBubbleReviewCard(quizMode);
-  });
-
-  const rememberedButton = createButton(t("remembered"), true);
-  rememberedButton.addEventListener("click", () => {
-    void updateRecall(record.id, "remembered").catch(handleRuntimeFailure);
-    bubbleReviewIndex += 1;
-    bubbleReviewShowAnswer = !quizMode;
-    renderBubbleReviewCard(quizMode);
-  });
-
-  const closeButton = createButton(t("later"));
-  closeButton.addEventListener("click", closePopups);
-
-  actions.append(unsureButton, rememberedButton, closeButton);
   recallPopup.append(actions);
-  appendToUiRoot(recallPopup);
-  positionPopupWithinViewport(recallPopup, centerRect);
+}
+
+function renderClozeReviewCard(record: VocabularyRecord): void {
+  if (!recallPopup) {
+    return;
+  }
+
+  const clozeSentence = createClozeSentence(record.source_sentence, record.text);
+  const hasCloze = clozeSentence !== record.source_sentence;
+  recallPopup.append(
+    createTextElement("h2", "lexitrace-popup__review-title", t("clozeQuiz")),
+    createTextElement(
+      "p",
+      "lexitrace-popup__review-instruction",
+      hasCloze ? t("chooseMissingWord") : t("chooseMatchingWord")
+    )
+  );
+
+  if (hasCloze) {
+    appendSentenceSection(recallPopup, t("sourceSentence"), clozeSentence);
+  } else {
+    appendSection(recallPopup, t("meaning"), record.meaning_zh || record.meaning_en || t("noSavedMeaning"));
+  }
+
+  if (bubbleReviewOptions.length === 0) {
+    bubbleReviewOptions = buildQuizOptions(record);
+  }
+
+  const options = document.createElement("div");
+  options.className = "lexitrace-quiz-options";
+  for (const option of bubbleReviewOptions) {
+    const optionButton = createButton(option);
+    optionButton.classList.add("lexitrace-quiz-option");
+    optionButton.disabled = Boolean(bubbleReviewAnswer) || bubbleReviewSaving;
+
+    if (bubbleReviewAnswer) {
+      if (normalizeText(option) === record.normalized_text) {
+        optionButton.classList.add("lexitrace-quiz-option--correct");
+      } else if (option === bubbleReviewAnswer.selected) {
+        optionButton.classList.add("lexitrace-quiz-option--wrong");
+      }
+    }
+
+    optionButton.addEventListener("click", () => {
+      void submitClozeAnswer(record, option);
+    });
+    options.append(optionButton);
+  }
+  recallPopup.append(options);
+
+  if (!bubbleReviewAnswer) {
+    const actions = document.createElement("div");
+    actions.className = "lexitrace-popup__actions";
+    const laterButton = createButton(t("later"));
+    laterButton.addEventListener("click", closePopups);
+    actions.append(laterButton);
+    recallPopup.append(actions);
+    return;
+  }
+
+  const feedback = createTextElement(
+    "p",
+    bubbleReviewAnswer.correct
+      ? "lexitrace-quiz-feedback lexitrace-quiz-feedback--correct"
+      : "lexitrace-quiz-feedback lexitrace-quiz-feedback--wrong",
+    bubbleReviewAnswer.correct
+      ? t("quizCorrect")
+      : t("quizWrong", { word: record.text, meaning: record.meaning_zh || record.meaning_en || t("noSavedMeaning") })
+  );
+  feedback.setAttribute("role", "status");
+  recallPopup.append(feedback);
+
+  const actions = document.createElement("div");
+  actions.className = "lexitrace-popup__actions";
+  const nextButton = createButton(
+    bubbleReviewIndex + 1 >= bubbleReviewQueue.length
+      ? t("finishReview")
+      : t("nextQuestion"),
+    true
+  );
+  nextButton.disabled = bubbleReviewSaving;
+  nextButton.addEventListener("click", advanceBubbleReview);
+  actions.append(nextButton);
+  recallPopup.append(actions);
+}
+
+async function submitBubbleRecall(
+  record: VocabularyRecord,
+  outcome: "remembered" | "unsure"
+): Promise<void> {
+  if (bubbleReviewSaving) {
+    return;
+  }
+
+  bubbleReviewSaving = true;
+  renderBubbleReviewCard();
+  try {
+    await updateRecall(record.id, outcome, () => undefined);
+    if (outcome === "remembered") {
+      bubbleReviewRememberedCount += 1;
+    }
+    advanceBubbleReview();
+  } catch (error) {
+    bubbleReviewSaving = false;
+    handleRuntimeFailure(error);
+  }
+}
+
+async function submitClozeAnswer(
+  record: VocabularyRecord,
+  selected: string
+): Promise<void> {
+  if (bubbleReviewAnswer || bubbleReviewSaving) {
+    return;
+  }
+
+  const correct = normalizeText(selected) === record.normalized_text;
+  bubbleReviewAnswer = { selected, correct };
+  bubbleReviewSaving = true;
+  renderBubbleReviewCard();
+
+  try {
+    await updateRecall(
+      record.id,
+      correct ? "remembered" : "unsure",
+      () => undefined,
+      "quiz"
+    );
+    if (correct) {
+      bubbleReviewRememberedCount += 1;
+    }
+    bubbleReviewSaving = false;
+    renderBubbleReviewCard();
+  } catch (error) {
+    bubbleReviewSaving = false;
+    handleRuntimeFailure(error);
+  }
+}
+
+function advanceBubbleReview(): void {
+  bubbleReviewIndex += 1;
+  bubbleReviewShowAnswer = false;
+  bubbleReviewAnswer = undefined;
+  bubbleReviewOptions = [];
+  bubbleReviewSaving = false;
+  renderBubbleReviewCard();
+}
+
+function renderBubbleReviewComplete(): void {
+  if (!recallPopup) {
+    return;
+  }
+
+  recallPopup.replaceChildren(
+    createTextElement("p", "lexitrace-popup__progress", t("reviewComplete")),
+    createTextElement("h2", "lexitrace-popup__review-title", t("reviewCompleteTitle")),
+    createTextElement(
+      "p",
+      "lexitrace-popup__review-instruction",
+      t("reviewCompleteSummary", {
+        remembered: bubbleReviewRememberedCount,
+        total: bubbleReviewQueue.length
+      })
+    )
+  );
+  const actions = document.createElement("div");
+  actions.className = "lexitrace-popup__actions";
+  const doneButton = createButton(t("continueReading"), true);
+  doneButton.addEventListener("click", closePopups);
+  actions.append(doneButton);
+  recallPopup.append(actions);
+  animateContentChange(recallPopup);
+}
+
+function buildQuizOptions(record: VocabularyRecord): string[] {
+  const distractors = activeVocabulary
+    .filter(
+      (candidate) =>
+        candidate.id !== record.id &&
+        candidate.status !== "ignored" &&
+        normalizeText(candidate.text) !== record.normalized_text
+    )
+    .sort((a, b) => b.review_priority - a.review_priority)
+    .map((candidate) => candidate.text);
+  const fallbackDistractors = ["confirm", "allocate", "postpone", "maintain"];
+  const unique = [record.text];
+  const seen = new Set([record.normalized_text]);
+
+  for (const candidate of [...distractors, ...fallbackDistractors]) {
+    const normalizedCandidate = normalizeText(candidate);
+    if (!seen.has(normalizedCandidate)) {
+      seen.add(normalizedCandidate);
+      unique.push(candidate);
+    }
+    if (unique.length === 4) {
+      break;
+    }
+  }
+
+  for (let index = unique.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [unique[index], unique[swapIndex]] = [unique[swapIndex], unique[index]];
+  }
+
+  return unique;
 }
 
 function removePageBubble(): void {
-  pageBubble?.remove();
+  removeWithExitAnimation(pageBubble);
   pageBubble = undefined;
 }
 
-function schedulePassiveReviewPrompt(pageVocabulary: VocabularyRecord[]): void {
+async function schedulePassiveReviewPrompt(
+  pageVocabulary: VocabularyRecord[]
+): Promise<void> {
   if (
     reviewPromptScheduled ||
     !settings?.lightweightReviewPromptsEnabled ||
@@ -867,18 +1479,78 @@ function schedulePassiveReviewPrompt(pageVocabulary: VocabularyRecord[]): void {
     return;
   }
 
+  reviewPromptScheduled = true;
   const dueRecords = getDueReviewRecords(pageVocabulary);
-  if (dueRecords.length === 0 || Math.random() > getReviewPromptProbability()) {
+  if (dueRecords.length === 0) {
     return;
   }
 
-  reviewPromptScheduled = true;
-  const record = dueRecords[0];
-  window.setTimeout(() => {
-    if (extensionContextActive && settings?.lightweightReviewPromptsEnabled) {
-      renderReviewPrompt(record);
+  let lastShownAt = 0;
+  let dismissCount = 0;
+  try {
+    const promptState = await chrome.storage.local.get([
+      REVIEW_PROMPT_LAST_SHOWN_KEY,
+      REVIEW_PROMPT_DISMISS_COUNT_KEY
+    ]);
+    lastShownAt = Number(promptState[REVIEW_PROMPT_LAST_SHOWN_KEY] ?? 0);
+    dismissCount = Number(promptState[REVIEW_PROMPT_DISMISS_COUNT_KEY] ?? 0);
+  } catch (error) {
+    if (isContextInvalidatedError(error)) {
+      return;
     }
-  }, 4000);
+  }
+
+  if (
+    Date.now() - lastShownAt < REVIEW_PROMPT_COOLDOWN_MS ||
+    Math.random() > getReviewPromptProbability(dismissCount)
+  ) {
+    return;
+  }
+
+  const record = dueRecords[0];
+  attemptReviewPrompt(record, 0);
+}
+
+function attemptReviewPrompt(record: VocabularyRecord, attempt: number): void {
+  window.setTimeout(() => {
+    if (!extensionContextActive || !settings?.lightweightReviewPromptsEnabled) {
+      reviewPromptScheduled = false;
+      return;
+    }
+
+    if (canShowReviewPrompt()) {
+      renderReviewPrompt(record);
+      void chrome.storage.local
+        .set({ [REVIEW_PROMPT_LAST_SHOWN_KEY]: Date.now() })
+        .catch(() => undefined);
+      return;
+    }
+
+    if (attempt < 2) {
+      attemptReviewPrompt(record, attempt + 1);
+    } else {
+      reviewPromptScheduled = false;
+    }
+  }, attempt === 0 ? 4000 : 2500);
+}
+
+function canShowReviewPrompt(): boolean {
+  const selection = window.getSelection();
+  const activeElement = document.activeElement;
+  const isTyping =
+    activeElement instanceof HTMLElement &&
+    (activeElement.matches("input, textarea, [role='textbox']") ||
+      activeElement.isContentEditable);
+
+  return Boolean(
+    !document.hidden &&
+    !lookupPopup &&
+    !recallPopup &&
+    !reviewPrompt &&
+    !isTyping &&
+    (!selection || selection.isCollapsed) &&
+    Date.now() - lastPageScrollAt > 1400
+  );
 }
 
 function renderReviewPrompt(record: VocabularyRecord): void {
@@ -904,10 +1576,18 @@ function renderReviewPrompt(record: VocabularyRecord): void {
   actions.className = "lexitrace-popup__actions";
 
   const laterButton = createButton(t("later"));
-  laterButton.addEventListener("click", closeReviewPrompt);
+  laterButton.addEventListener("click", () => {
+    void recordReviewPromptDismissal();
+    closeReviewPrompt();
+  });
 
   const showAnswerButton = createButton(t("showAnswer"), true);
-  showAnswerButton.addEventListener("click", () => revealReviewPromptAnswer(record));
+  showAnswerButton.addEventListener("click", () => {
+    void chrome.storage.local
+      .set({ [REVIEW_PROMPT_DISMISS_COUNT_KEY]: 0 })
+      .catch(() => undefined);
+    revealReviewPromptAnswer(record);
+  });
 
   actions.append(laterButton, showAnswerButton);
   reviewPrompt.append(actions);
@@ -949,14 +1629,28 @@ function revealReviewPromptAnswer(record: VocabularyRecord): void {
 }
 
 function closeReviewPrompt(): void {
-  reviewPrompt?.remove();
+  removeWithExitAnimation(reviewPrompt);
   reviewPrompt = undefined;
+}
+
+async function recordReviewPromptDismissal(): Promise<void> {
+  try {
+    const result = await chrome.storage.local.get(REVIEW_PROMPT_DISMISS_COUNT_KEY);
+    const current = Number(result[REVIEW_PROMPT_DISMISS_COUNT_KEY] ?? 0);
+    await chrome.storage.local.set({
+      [REVIEW_PROMPT_DISMISS_COUNT_KEY]: Math.min(8, current + 1)
+    });
+  } catch {
+    // Prompt preference is best-effort; vocabulary data is unaffected.
+  }
 }
 
 function createPopupShell(rect: DOMRect): HTMLElement {
   const popup = document.createElement("section");
   popup.className = "lexitrace-popup";
   popup.setAttribute(ROOT_ATTRIBUTE, "true");
+  popup.setAttribute("role", "dialog");
+  popup.setAttribute("aria-live", "polite");
 
   const popupWidth = Math.min(440, window.innerWidth - 24);
   const maxLeft = Math.max(12, window.innerWidth - popupWidth - 12);
@@ -1075,12 +1769,45 @@ function createTextElement<K extends keyof HTMLElementTagNameMap>(
 }
 
 function closePopups(): void {
-  lookupPopup?.remove();
-  recallPopup?.remove();
+  lookupRequestVersion += 1;
+  removeWithExitAnimation(lookupPopup);
+  removeWithExitAnimation(recallPopup);
   lookupPopup = undefined;
   recallPopup = undefined;
   lookupAnchorRect = undefined;
   recallAnchorRect = undefined;
+}
+
+function createSpeakButton(text: string): HTMLButtonElement {
+  const button = createButton(t("speak"));
+  button.addEventListener("click", () => {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-US";
+    utterance.rate = 0.9;
+    window.speechSynthesis.speak(utterance);
+  });
+  return button;
+}
+
+function animateContentChange(element: HTMLElement): void {
+  element.classList.remove("lexitrace-content-changed");
+  void element.offsetWidth;
+  element.classList.add("lexitrace-content-changed");
+}
+
+function removeWithExitAnimation(element?: HTMLElement): void {
+  if (!element?.isConnected) {
+    return;
+  }
+
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    element.remove();
+    return;
+  }
+
+  element.classList.add("lexitrace-is-closing");
+  window.setTimeout(() => element.remove(), 160);
 }
 
 function appendToUiRoot(element: HTMLElement): void {
@@ -1135,18 +1862,20 @@ function isReviewDue(record: VocabularyRecord): boolean {
     return record.status === "new" || record.status === "weak";
   }
 
-  return new Date(record.next_review_at).getTime() <= Date.now();
+  const nextReviewTime = new Date(record.next_review_at).getTime();
+  return Number.isNaN(nextReviewTime) || nextReviewTime <= Date.now();
 }
 
-function getReviewPromptProbability(): number {
+function getReviewPromptProbability(dismissCount = 0): number {
+  const dismissalMultiplier = 1 / (1 + Math.max(0, dismissCount) * 0.6);
   switch (settings?.reviewPromptFrequency) {
     case "High":
-      return 1;
+      return 1 * dismissalMultiplier;
     case "Medium":
-      return 0.65;
+      return 0.65 * dismissalMultiplier;
     case "Low":
     default:
-      return 0.35;
+      return 0.35 * dismissalMultiplier;
   }
 }
 

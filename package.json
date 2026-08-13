@@ -1,6 +1,6 @@
 {
   "name": "lexitrace",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "description": "LexiTrace 詞跡 - lightweight contextual vocabulary lookup and passive review browser extension.",
@@ -17,24 +17,27 @@
     "dev": "npm run build",
     "build:icons": "node scripts/generate-icons.mjs",
     "build": "npm run build:icons && npm run build:manifest && npm run build:pages && npm run build:content && npm run build:background",
-    "build:release": "LEXITRACE_RELEASE=true npm run build",
+    "build:release": "node scripts/build-release.mjs",
     "build:manifest": "node scripts/build-manifest.mjs",
     "build:pages": "vite build --config vite.config.ts",
     "build:content": "vite build --config vite.content.config.ts",
     "build:background": "vite build --config vite.background.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "benchmark": "vitest bench src/content/matching.bench.ts --run"
   },
   "devDependencies": {
     "@types/chrome": "^0.1.40",
     "@types/node": "^25.6.0",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10"
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "opencc-js": "^1.3.0",
-    "wink-lemmatizer": "^3.0.4"
+    "opencc-js": "^1.3.0"
   }
 }

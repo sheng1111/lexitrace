@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
   "description": "__MSG_extensionDescription__",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "default_locale": "zh_TW",
   "action": {
     "default_title": "LexiTrace",
@@ -25,7 +25,7 @@
     "type": "module"
   },
   "options_page": "options/index.html",
-  "permissions": ["storage", "identity"],
+  "permissions": ["storage", "identity", "alarms"],
   "host_permissions": [
     "https://sheets.googleapis.com/*",
     "https://api.dictionaryapi.dev/*",
@@ -38,8 +38,7 @@
   "oauth2": {
     "client_id": "544002510862-4b183asghpljku6oonj4anjuq016ec34.apps.googleusercontent.com",
     "scopes": [
-      "https://www.googleapis.com/auth/spreadsheets",
-      "https://www.googleapis.com/auth/drive.file"
+      "https://www.googleapis.com/auth/spreadsheets"
     ]
   },
   "content_scripts": [

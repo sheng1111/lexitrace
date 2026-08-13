@@ -32,17 +32,20 @@ Implemented:
 - Spaced review metadata: next review time, last reviewed time, interval, and ease factor
 - Page exposure tracking for repeated encounters
 - Page vocabulary bubble
+- Toolbar vocabulary overview with quick recall
+- Page-level source-sentence cloze quiz with recall scoring
+- TOEIC foundation sessions that prioritize due, weak, and workplace vocabulary
+- Local TOEIC learning metrics for attention count and quiz accuracy
 - Toolbar popup and options page
-- Optional Google Sheet push sync foundation
+- Optional bidirectional Google Sheet sync with cross-device connection
 - JSON export
 - Extension icon set
+- Automated regression tests for vocabulary matching and cloze generation
 
 Not yet complete:
 
-- Full cross-device pull sync
-- Conflict resolution for Google Sheet sync
+- Selective sync restore and history UI
 - Full spaced repetition scheduling
-- Automated tests
 - Chrome Web Store release hardening
 
 ## Tech Stack
@@ -53,7 +56,7 @@ Not yet complete:
 - Native IndexedDB
 - `chrome.storage.local`
 - `opencc-js` for Simplified-to-Traditional Chinese conversion
-- `wink-lemmatizer` for English word-form normalization
+- Lightweight tested word-form normalization for common inflections and irregulars
 - Plain DOM UI for a small MVP runtime
 
 Python is not part of the extension runtime. If Python tooling is added later, use a local `.venv`.
@@ -133,6 +136,21 @@ Type check:
 npm run typecheck
 ```
 
+Run regression tests:
+
+```bash
+npm test
+```
+
+Run the page-matching performance benchmark:
+
+```bash
+npm run benchmark
+```
+
+Measured baseline and before/after results are documented in
+[docs/performance.md](./docs/performance.md).
+
 Generate icons:
 
 ```bash
@@ -155,7 +173,7 @@ npm run build:release
 
 ## Google Sheet Sync
 
-LexiTrace is local-first by default. Google Sheet sync is optional and currently focuses on creating a user-owned spreadsheet and pushing saved vocabulary records.
+LexiTrace is local-first by default. Google Sheet sync is optional and uses Google OAuth plus the official Google Sheets API. It can create a user-owned spreadsheet or connect the same spreadsheet on another device, then merge newer records in both directions using `updated_at`. Auto mode debounces local changes, polls for changes from other devices every 15 minutes, and retries transient failures.
 
 Recommended user flow:
 
@@ -164,6 +182,7 @@ Recommended user flow:
 3. Complete Google authorization
 4. LexiTrace creates a dedicated `LexiTrace Sync Data` spreadsheet
 5. Use 立即同步 or 打開 Google Sheet from Settings
+6. On another device, use 連結既有同步試算表 and paste the same Sheet URL
 
 Developer setup:
 

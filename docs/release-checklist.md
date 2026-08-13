@@ -20,7 +20,6 @@ Create a Google Cloud OAuth client for a Chrome extension:
 - Extension ID: production Chrome Web Store extension ID
 - Scopes:
   - `https://www.googleapis.com/auth/spreadsheets`
-  - `https://www.googleapis.com/auth/drive.file`
 
 Do not put any client secret, service account key, or refresh token in the extension. The OAuth client ID is public and expected to be visible in `manifest.json`.
 
@@ -50,19 +49,26 @@ npm run build:release
 
 - `client_id` is not a secret.
 - Do not obfuscate `client_id`; obfuscation does not provide real security.
-- Keep scopes minimal.
-- Use `drive.file` so LexiTrace can only access files it creates or the user explicitly opens with the app.
+- Keep scopes minimal. LexiTrace requests the Sheets scope because users can paste an existing spreadsheet ID; it does not request a separate Google Drive API scope.
 - Keep user vocabulary local-first and sync only saved vocabulary data.
 
 ## Pre-Submission Checks
 
+Set the release number once in `package.json`. `build:manifest` validates and
+copies it into the Chrome manifest; Chrome Web Store updates require a version
+higher than the previously published package. For this release, verify `0.2.0`.
+
 ```bash
 npm run typecheck
+npm test
+npm run benchmark
 npm run build:release
 npm audit --audit-level=moderate
 ```
 
 Then load `dist/` as an unpacked extension and verify:
+
+- `dist/manifest.json` reports version `0.2.0`.
 
 - Selection lookup popup appears and is not clipped.
 - Traditional Chinese meanings appear for common words.

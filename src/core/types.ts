@@ -19,8 +19,7 @@ export type SyncStatus =
   | "local_only"
   | "pending"
   | "synced"
-  | "failed"
-  | "conflict";
+  | "failed";
 
 export type LookupProviderType =
   | "local_dictionary"
@@ -98,7 +97,6 @@ export interface VocabularyRecord {
   is_phrase: boolean;
   is_ignored: boolean;
   sync_status: SyncStatus;
-  external_sheet_row_id?: string;
 }
 
 export interface PageRecord {
@@ -144,13 +142,12 @@ export interface ExtensionSettings {
   disableInCodeBlocks: boolean;
   storageMode: "Local only" | "Google Sheet optional sync";
   googleSheetSyncEnabled: boolean;
-  googleSheetAuthMode: "oauth" | "apps_script";
-  googleSheetEndpointUrl: string;
   googleSheetId?: string;
   googleSheetName?: string;
   googleSheetUrl?: string;
   syncMode: "Off" | "Manual" | "Auto";
   lastSyncAt?: string;
+  lastSyncError?: string;
   recallFirstPopupEnabled: boolean;
   quickReviewQuestionCount: 1;
   pageReviewQuestionCount: 1 | 2 | 3;
@@ -163,6 +160,25 @@ export interface SaveVocabularyInput {
   manualMeaningZh?: string;
   manualMeaningEn?: string;
   userNote?: string;
+  manualToeicUsefulness?: ToeicUsefulness;
+  manualContextType?: ContextType;
+}
+
+export interface GoogleSheetSyncResult {
+  pushed: number;
+  pulled: number;
+  conflicts: number;
+  pending: number;
+  failed: number;
+}
+
+export interface UpdateVocabularyDetailsInput {
+  id: string;
+  meaningZh: string;
+  meaningEn?: string;
+  userNote?: string;
+  toeicUsefulness: ToeicUsefulness;
+  contextType: ContextType;
 }
 
 export type RecallOutcome = "remembered" | "unsure";

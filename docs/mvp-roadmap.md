@@ -20,6 +20,8 @@ Done means a user can select a word, save it, see it highlighted, click it later
 4. Rule-based TOEIC badge
 5. Rule-based context badge
 6. CSV and JSON export
+7. Five-word TOEIC foundation sessions prioritized by weakness and due state
+8. Local TOEIC attention and quiz-accuracy metrics
 
 Done means saved words naturally reappear as light review opportunities during browsing.
 
@@ -27,17 +29,19 @@ Done means saved words naturally reappear as light review opportunities during b
 
 1. Google OAuth permission flow
 2. Automatic dedicated Sheet creation
-3. Manual push sync
-4. Pending, synced, failed statuses
-5. Quiet sync errors in settings
+3. Connect an existing Sheet on another device
+4. Manual sync plus durable debounced, polling, and retrying automatic sync
+5. Bidirectional last-write-wins merge
+6. Pending, synced, failed, and resolved-conflict reporting
+7. Quiet sync errors in settings
 
-The OAuth-first UI and push path exist in the current foundation. Done means the extension remains local-first but can export saved vocabulary to a user-owned sheet.
+Done means the extension remains local-first while two devices can converge vocabulary through a user-owned Sheet without a custom endpoint.
 
 ## P2
 
-1. Pull sync
+1. Selective sync restore and history
 2. Better dictionary data
-3. Lemmatization and word-family matching
+3. Broader word-family derivation beyond the lightweight Phase 1 rules
 4. AI provider discussion
 5. Local AI provider discussion
 

@@ -3,12 +3,13 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const rootDir = fileURLToPath(new URL(".", import.meta.url));
+const releaseBuild = process.env.LEXITRACE_RELEASE === "true";
 
 export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: !releaseBuild,
     rollupOptions: {
       input: {
         options: resolve(rootDir, "options/index.html"),

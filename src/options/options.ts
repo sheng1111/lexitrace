@@ -10,6 +10,10 @@ if (!optionsRoot) {
 }
 
 const root = optionsRoot;
+let settingControlId = 0;
+let saveStatusTimer: number | undefined;
+let settingsSaveQueue: Promise<void> = Promise.resolve();
+let saveRequestVersion = 0;
 
 void render();
 
@@ -24,10 +28,24 @@ function createSettingsPage(settings: ExtensionSettings): HTMLElement {
 
   const header = document.createElement("header");
   header.className = "settings-header";
-  header.append(
+  const brand = document.createElement("div");
+  brand.className = "settings-brand";
+  brand.append(
+    createText("span", "settings-brand-mark", "L"),
+    createText("span", "settings-eyebrow", t("settingsEyebrow"))
+  );
+  const titleRow = document.createElement("div");
+  titleRow.className = "settings-title-row";
+  const titleCopy = document.createElement("div");
+  titleCopy.append(
     createText("h1", "settings-title", t("appTitle")),
     createText("p", "settings-subtitle", t("appSubtitle"))
   );
+  const saveStatus = createText("span", "settings-save-status", "");
+  saveStatus.id = "lexitrace-settings-save-status";
+  saveStatus.setAttribute("role", "status");
+  titleRow.append(titleCopy, saveStatus);
+  header.append(brand, titleRow);
 
   const grid = document.createElement("div");
   grid.className = "settings-grid";
@@ -72,6 +90,17 @@ function createLookupSection(settings: ExtensionSettings): HTMLElement {
   const section = createSection(t("settingsLookup"));
   section.append(
     createText("p", "settings-copy", t("lookupProviderDesc")),
+    createSelectRow(
+      t("defaultLookupAction"),
+      t("defaultLookupActionDesc"),
+      settings.defaultActionAfterLookup,
+      [
+        { value: "Ask" as const, label: t("defaultActionAsk") },
+        { value: "Save automatically" as const, label: t("defaultActionSave") },
+        { value: "Understood automatically" as const, label: t("defaultActionUnderstood") }
+      ],
+      (value) => updateAndRender({ defaultActionAfterLookup: value })
+    ),
     createCheckboxRow(
       t("showToeicBadge"),
       t("showToeicBadgeDesc"),
@@ -83,6 +112,12 @@ function createLookupSection(settings: ExtensionSettings): HTMLElement {
       t("showContextBadgeDesc"),
       settings.showContextBadge,
       (value) => updateAndRender({ showContextBadge: value })
+    ),
+    createCheckboxRow(
+      t("disableInCodeBlocks"),
+      t("disableInCodeBlocksDesc"),
+      settings.disableInCodeBlocks,
+      (value) => updateAndRender({ disableInCodeBlocks: value })
     ),
     createCheckboxRow(
       t("unofficialGoogleTranslate"),
@@ -120,6 +155,17 @@ function createReviewSection(settings: ExtensionSettings): HTMLElement {
       ],
       (value) => updateAndRender({ reviewPromptFrequency: value })
     ),
+    createSelectRow(
+      t("pageReviewQuestionCount"),
+      t("pageReviewQuestionCountDesc"),
+      settings.pageReviewQuestionCount,
+      [
+        { value: 1 as const, label: t("questionCount", { count: 1 }) },
+        { value: 2 as const, label: t("questionCount", { count: 2 }) },
+        { value: 3 as const, label: t("questionCount", { count: 3 }) }
+      ],
+      (value) => updateAndRender({ pageReviewQuestionCount: value })
+    ),
     createCheckboxRow(
       t("hideMasteredWords"),
       t("hideMasteredWordsDesc"),
@@ -135,7 +181,11 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
   const status = createText(
     "p",
     "status-line",
-    settings.lastSyncAt ? t("lastSync", { time: formatDateTime(settings.lastSyncAt) }) : ""
+    settings.lastSyncError
+      ? t("lastSyncError", { message: settings.lastSyncError })
+      : settings.lastSyncAt
+        ? t("lastSync", { time: formatDateTime(settings.lastSyncAt) })
+        : t("syncNotYet")
   );
 
   section.append(createText("p", "settings-copy", t("syncIntro")));
@@ -149,17 +199,19 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
     enableButton.type = "button";
     enableButton.textContent = t("enableGoogleSheetSync");
     enableButton.addEventListener("click", async () => {
+      enableButton.disabled = true;
       status.textContent = t("syncing");
       try {
         const next = await sendRuntimeMessage({ type: "ENABLE_GOOGLE_SHEET_OAUTH_SYNC" });
         root.replaceChildren(createSettingsPage(next));
       } catch (error) {
+        enableButton.disabled = false;
         status.textContent =
           error instanceof Error ? error.message : t("oauthSetupRequired");
       }
     });
     actions.append(enableButton);
-    section.append(actions, status, createAdvancedSyncSection(settings));
+    section.append(actions, createExistingSheetConnector(status), status);
     return section;
   }
 
@@ -174,13 +226,15 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
 
   const syncButton = createActionButton(t("syncNow"), true);
   syncButton.addEventListener("click", async () => {
+    syncButton.disabled = true;
     status.textContent = t("syncing");
     try {
       const result = await sendRuntimeMessage({ type: "SYNC_PENDING_VOCABULARY" });
-      const lastSyncAt = new Date().toISOString();
-      await saveSettings({ lastSyncAt });
       status.textContent = t("syncResult", {
         pushed: result.pushed,
+        pulled: result.pulled,
+        conflicts: result.conflicts,
+        pending: result.pending,
         failed: result.failed
       });
     } catch (error) {
@@ -188,6 +242,8 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
         error instanceof Error
           ? error.message
           : t("syncFailedLocalSafe");
+    } finally {
+      syncButton.disabled = false;
     }
   });
 
@@ -199,13 +255,15 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
     }
   });
 
-  const changeButton = createActionButton(t("changeSyncSheet"));
+  const changeButton = createActionButton(t("createNewSyncSheet"));
   changeButton.addEventListener("click", async () => {
+    changeButton.disabled = true;
     status.textContent = t("syncing");
     try {
       const next = await sendRuntimeMessage({ type: "ENABLE_GOOGLE_SHEET_OAUTH_SYNC" });
       root.replaceChildren(createSettingsPage(next));
     } catch (error) {
+      changeButton.disabled = false;
       status.textContent =
         error instanceof Error ? error.message : t("oauthSetupRequired");
     }
@@ -213,12 +271,33 @@ function createSyncSection(settings: ExtensionSettings): HTMLElement {
 
   const disableButton = createActionButton(t("disableSync"));
   disableButton.addEventListener("click", async () => {
-    const next = await sendRuntimeMessage({ type: "DISABLE_GOOGLE_SHEET_SYNC" });
-    root.replaceChildren(createSettingsPage(next));
+    disableButton.disabled = true;
+    try {
+      const next = await sendRuntimeMessage({ type: "DISABLE_GOOGLE_SHEET_SYNC" });
+      root.replaceChildren(createSettingsPage(next));
+    } catch (error) {
+      disableButton.disabled = false;
+      status.textContent =
+        error instanceof Error ? error.message : t("settingsSaveFailed");
+    }
   });
 
   actions.append(syncButton, openButton, changeButton, disableButton);
-  section.append(actions, status, createAdvancedSyncSection(settings));
+  section.append(
+    createSelectRow(
+      t("syncMode"),
+      t("syncModeDesc"),
+      settings.syncMode,
+      [
+        { value: "Manual" as const, label: t("syncModeManual") },
+        { value: "Auto" as const, label: t("syncModeAuto") }
+      ],
+      (value) => updateAndRender({ syncMode: value })
+    ),
+    actions,
+    createExistingSheetConnector(status),
+    status
+  );
   return section;
 }
 
@@ -273,7 +352,7 @@ function createCheckboxRow(
   return createSettingRow(title, description, input);
 }
 
-function createSelectRow<T extends string>(
+function createSelectRow<T extends string | number>(
   title: string,
   description: string,
   value: T,
@@ -284,31 +363,24 @@ function createSelectRow<T extends string>(
   select.className = "setting-select";
 
   for (const item of options) {
-    const optionValue = typeof item === "string" ? item : item.value;
+    const optionValue = typeof item === "object" ? item.value : item;
     const option = document.createElement("option");
-    option.value = optionValue;
-    option.textContent = typeof item === "string" ? item : item.label;
+    option.value = String(optionValue);
+    option.textContent = typeof item === "object" ? item.label : String(item);
     option.selected = optionValue === value;
     select.append(option);
   }
 
-  select.addEventListener("change", () => onChange(select.value as T));
+  select.addEventListener("change", () => {
+    const selected = options.find((item) => {
+      const optionValue = typeof item === "object" ? item.value : item;
+      return String(optionValue) === select.value;
+    });
+    if (selected !== undefined) {
+      onChange(typeof selected === "object" ? selected.value : selected);
+    }
+  });
   return createSettingRow(title, description, select);
-}
-
-function createTextRow(
-  title: string,
-  description: string,
-  value: string,
-  onChange: (value: string) => void
-): HTMLElement {
-  const input = document.createElement("input");
-  input.className = "setting-input";
-  input.type = "url";
-  input.value = value;
-  input.placeholder = t("syncEndpointPlaceholder");
-  input.addEventListener("change", () => onChange(input.value.trim()));
-  return createSettingRow(title, description, input);
 }
 
 function createSettingRow(
@@ -319,9 +391,18 @@ function createSettingRow(
   const row = document.createElement("div");
   row.className = "setting-row";
 
-  const label = document.createElement("div");
+  settingControlId += 1;
+  const controlId = `lexitrace-setting-${settingControlId}`;
+  const descriptionId = `${controlId}-description`;
+  control.id = controlId;
+  control.setAttribute("aria-describedby", descriptionId);
+
+  const label = document.createElement("label");
   label.className = "setting-label";
-  label.append(createText("strong", "", title), createText("span", "", description));
+  label.htmlFor = controlId;
+  const descriptionElement = createText("span", "", description);
+  descriptionElement.id = descriptionId;
+  label.append(createText("strong", "", title), descriptionElement);
 
   row.append(label, control);
   return row;
@@ -334,42 +415,102 @@ async function saveSettings(
 }
 
 async function updateAndRender(patch: Partial<ExtensionSettings>): Promise<void> {
-  const settings = await saveSettings(patch);
-  root.replaceChildren(createSettingsPage(settings));
+  const requestVersion = ++saveRequestVersion;
+  showSaveStatus(t("settingsSaving"), "saving");
+  const saveTask = settingsSaveQueue.then(() => saveSettings(patch));
+  settingsSaveQueue = saveTask.then(
+    () => undefined,
+    () => undefined
+  );
+
+  try {
+    await saveTask;
+    if (requestVersion === saveRequestVersion) {
+      showSaveStatus(t("settingsSaved"), "saved");
+    }
+  } catch (error) {
+    if (requestVersion !== saveRequestVersion) {
+      return;
+    }
+    showSaveStatus(
+      error instanceof Error ? error.message : t("settingsSaveFailed"),
+      "error"
+    );
+    const current = await sendRuntimeMessage({ type: "GET_SETTINGS" });
+    root.replaceChildren(createSettingsPage(current));
+  }
 }
 
-function createAdvancedSyncSection(settings: ExtensionSettings): HTMLElement {
+function showSaveStatus(
+  message: string,
+  state: "saving" | "saved" | "error"
+): void {
+  if (saveStatusTimer !== undefined) {
+    window.clearTimeout(saveStatusTimer);
+  }
+
+  const status = document.getElementById("lexitrace-settings-save-status");
+  if (!status) {
+    return;
+  }
+
+  status.textContent = message;
+  status.dataset.state = state;
+  if (state !== "saving") {
+    saveStatusTimer = window.setTimeout(() => {
+      status.textContent = "";
+      delete status.dataset.state;
+    }, 2200);
+  }
+}
+
+function createExistingSheetConnector(status: HTMLElement): HTMLElement {
   const details = document.createElement("details");
   details.className = "advanced-section";
 
   const summary = document.createElement("summary");
-  summary.textContent = t("advancedSync");
+  summary.textContent = t("connectExistingSheet");
 
-  details.append(
-    summary,
-    createText("p", "status-line", t("advancedSyncDesc")),
-    createSelectRow(
-      t("syncMode"),
-      t("syncModeDesc"),
-      settings.syncMode,
-      [
-        { value: "Off" as const, label: t("syncModeOff") },
-        { value: "Manual" as const, label: t("syncModeManual") },
-        { value: "Auto" as const, label: t("syncModeAuto") }
-      ],
-      (value) => updateAndRender({ syncMode: value })
-    ),
-    createTextRow(
-      t("syncEndpoint"),
-      t("advancedSyncDesc"),
-      settings.googleSheetEndpointUrl,
-      (value) =>
-        updateAndRender({
-          googleSheetAuthMode: "apps_script",
-          googleSheetEndpointUrl: value
-        })
-    )
-  );
+  const copy = createText("p", "status-line", t("connectExistingSheetDesc"));
+  const form = document.createElement("div");
+  form.className = "sync-connect-form";
+  const input = document.createElement("input");
+  input.className = "setting-input";
+  input.type = "text";
+  input.autocomplete = "off";
+  input.placeholder = t("sheetUrlPlaceholder");
+  input.setAttribute("aria-label", t("sheetUrlLabel"));
+  const connectButton = createActionButton(t("connectSheet"), true);
+  connectButton.addEventListener("click", async () => {
+    const sheetUrlOrId = input.value.trim();
+    if (!sheetUrlOrId) {
+      status.textContent = t("sheetUrlRequired");
+      input.focus();
+      return;
+    }
+
+    connectButton.disabled = true;
+    input.disabled = true;
+    status.textContent = t("connectingSheet");
+    try {
+      const next = await sendRuntimeMessage({
+        type: "CONNECT_GOOGLE_SHEET",
+        payload: { sheetUrlOrId }
+      });
+      root.replaceChildren(createSettingsPage(next));
+    } catch (error) {
+      connectButton.disabled = false;
+      input.disabled = false;
+      status.textContent = error instanceof Error ? error.message : t("syncFailedLocalSafe");
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      connectButton.click();
+    }
+  });
+  form.append(input, connectButton);
+  details.append(summary, copy, form);
 
   return details;
 }

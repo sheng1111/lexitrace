@@ -2,6 +2,7 @@ import { isPhrase, normalizeUrl } from "../core/normalize";
 import type {
   RecallOutcome,
   SaveVocabularyInput,
+  UpdateVocabularyDetailsInput,
   VocabularyRecord
 } from "../core/types";
 
@@ -157,8 +158,9 @@ export async function createOrUpdateVocabulary(
           : existing.review_interval_days,
       ease_factor:
         isActiveSave && existing.ease_factor === undefined ? 2.3 : existing.ease_factor,
-      toeic_usefulness: input.lookup.toeicUsefulness,
-      context_type: input.lookup.contextType,
+      toeic_usefulness:
+        input.manualToeicUsefulness ?? input.lookup.toeicUsefulness,
+      context_type: input.manualContextType ?? input.lookup.contextType,
       is_phrase: isPhrase(input.lookup.normalizedText),
       sync_status: existing.sync_status === "synced" ? "pending" : existing.sync_status
     });
@@ -192,8 +194,9 @@ export async function createOrUpdateVocabulary(
     next_review_at: isActiveSave ? scheduleInitialReview(now) : undefined,
     review_interval_days: isActiveSave ? 1 : undefined,
     ease_factor: isActiveSave ? 2.3 : undefined,
-    toeic_usefulness: input.lookup.toeicUsefulness,
-    context_type: input.lookup.contextType,
+    toeic_usefulness:
+      input.manualToeicUsefulness ?? input.lookup.toeicUsefulness,
+    context_type: input.manualContextType ?? input.lookup.contextType,
     is_phrase: isPhrase(input.lookup.normalizedText),
     is_ignored: false,
     sync_status: "local_only"
@@ -204,7 +207,8 @@ export async function createOrUpdateVocabulary(
 
 export async function recordRecallOutcome(
   id: string,
-  outcome: RecallOutcome
+  outcome: RecallOutcome,
+  mode: "recall" | "quiz" = "recall"
 ): Promise<VocabularyRecord> {
   const existing = await getVocabularyById(id);
 
@@ -222,6 +226,10 @@ export async function recordRecallOutcome(
     last_seen_at: now,
     remember_count: existing.remember_count + (remembered ? 1 : 0),
     forget_count: existing.forget_count + (remembered ? 0 : 1),
+    quiz_correct_count:
+      existing.quiz_correct_count + (mode === "quiz" && remembered ? 1 : 0),
+    quiz_wrong_count:
+      existing.quiz_wrong_count + (mode === "quiz" && !remembered ? 1 : 0),
     status: remembered
       ? nextRememberedStatus(existing.status)
       : "weak",
@@ -236,6 +244,104 @@ export async function recordRecallOutcome(
   };
 
   return putVocabulary(next);
+}
+
+export async function setVocabularySyncStatus(
+  ids: string[],
+  syncStatus: VocabularyRecord["sync_status"]
+): Promise<void> {
+  const uniqueIds = [...new Set(ids)];
+  const db = await openDatabase();
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(VOCABULARY_STORE, "readwrite");
+    const store = transaction.objectStore(VOCABULARY_STORE);
+
+    for (const id of uniqueIds) {
+      const request = store.get(id) as IDBRequest<VocabularyRecord | undefined>;
+      request.onsuccess = () => {
+        if (request.result) {
+          store.put({ ...request.result, sync_status: syncStatus });
+        }
+      };
+      request.onerror = () => transaction.abort();
+    }
+
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("更新同步狀態失敗。"));
+  });
+}
+
+export async function reconcileSavedVocabularySnapshot(
+  records: VocabularyRecord[],
+  baselineRecords: VocabularyRecord[]
+): Promise<number> {
+  const db = await openDatabase();
+  const baselineByText = new Map(
+    baselineRecords.map((record) => [record.normalized_text, record])
+  );
+
+  let preservedLocalChanges = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(VOCABULARY_STORE, "readwrite");
+    const store = transaction.objectStore(VOCABULARY_STORE);
+    const request = store.getAll() as IDBRequest<VocabularyRecord[]>;
+
+    request.onsuccess = () => {
+      const nextByText = new Map(
+        records.map((record) => [record.normalized_text, record])
+      );
+
+      for (const existing of request.result) {
+        if (existing.type === "saved") {
+          store.delete(existing.id);
+
+          const baseline = baselineByText.get(existing.normalized_text);
+          if (!baseline || !recordsMatchExactly(existing, baseline)) {
+            nextByText.set(existing.normalized_text, existing);
+            preservedLocalChanges += 1;
+          }
+        }
+      }
+
+      for (const record of nextByText.values()) {
+        store.put(record);
+      }
+    };
+    request.onerror = () => transaction.abort();
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error("同步本機資料失敗。"));
+  });
+
+  return preservedLocalChanges;
+}
+
+function recordsMatchExactly(a: VocabularyRecord, b: VocabularyRecord): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export async function updateVocabularyDetails(
+  input: UpdateVocabularyDetailsInput
+): Promise<VocabularyRecord> {
+  const existing = await getVocabularyById(input.id);
+  if (!existing) {
+    throw new Error(`Vocabulary record not found: ${input.id}`);
+  }
+
+  return putVocabulary({
+    ...existing,
+    meaning_zh: input.meaningZh,
+    meaning_en: input.meaningEn,
+    user_note: input.userNote,
+    toeic_usefulness: input.toeicUsefulness,
+    context_type: input.contextType,
+    updated_at: new Date().toISOString(),
+    sync_status: existing.sync_status === "synced" ? "pending" : existing.sync_status
+  });
 }
 
 export async function recordPageExposures(ids: string[]): Promise<VocabularyRecord[]> {
@@ -253,6 +359,7 @@ export async function recordPageExposures(ids: string[]): Promise<VocabularyReco
     updated.push(
       await putVocabulary({
         ...existing,
+        updated_at: now,
         last_seen_at: now,
         seen_count: existing.seen_count + 1,
         review_priority: Math.min(100, existing.review_priority + 2),
