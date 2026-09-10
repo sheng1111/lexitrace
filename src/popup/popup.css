@@ -1,3 +1,23 @@
+.learning-path {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #dfe3ea;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.learning-path__title {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.learning-path__step + .learning-path__step {
+  margin-top: 12px;
+}
+
+.learning-path__step strong { font-size: 13px; color: #4338ca; }
+.learning-path__step p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; color: #475569; }
+
 :root {
   color-scheme: light;
   font-synthesis: none;

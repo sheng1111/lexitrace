@@ -67,7 +67,36 @@
   width: min(460px, calc(100vw - 24px));
 }
 
+::highlight(lexitrace-reading) {
+  background-color: #fde68a;
+  color: #172033;
+}
+
+.lexitrace-reading-launcher {
+  position: fixed;
+  right: 18px;
+  top: 18px;
+  pointer-events: auto;
+  background: #fef3c7;
+  color: #713f12;
+  border: 1px solid #fcd34d;
+  box-shadow: 0 4px 16px #17203320;
+}
+
+.lexitrace-reading-card {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--lexitrace-border);
+  border-radius: 10px;
+  background: var(--lexitrace-surface-muted);
+}
+
+.lexitrace-reading-card .lexitrace-popup__sentence {
+  margin: 0;
+}
+
 .lexitrace-popup__title {
+  overflow-wrap: anywhere;
   margin: 0;
   font-size: 18px;
   font-weight: 720;

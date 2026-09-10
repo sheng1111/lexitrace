@@ -1,35 +1,28 @@
 export function extractSentenceAroundSelection(
   containerText: string,
-  selectedText: string
+  selectedText: string,
+  selectionOffset?: number
 ): string {
   const cleanText = containerText.replace(/\s+/g, " ").trim();
   const cleanSelection = selectedText.replace(/\s+/g, " ").trim();
-  const index = cleanText.toLowerCase().indexOf(cleanSelection.toLowerCase());
+  if (!cleanSelection) return "";
+  const index = selectionOffset === undefined
+    ? cleanText.toLowerCase().indexOf(cleanSelection.toLowerCase())
+    : containerText.slice(0, selectionOffset).replace(/\s+/g, " ").trimStart().length;
 
   if (index < 0) {
-    return cleanText.slice(0, 240);
+    return cleanSelection;
   }
 
-  const before = cleanText.slice(0, index);
-  const after = cleanText.slice(index + cleanSelection.length);
-  const sentenceStart = Math.max(
-    before.lastIndexOf("."),
-    before.lastIndexOf("?"),
-    before.lastIndexOf("!"),
-    before.lastIndexOf(";")
-  );
-  const sentenceEndCandidates = [after.indexOf("."), after.indexOf("?"), after.indexOf("!")].filter(
-    (position) => position >= 0
-  );
-  const sentenceEnd =
-    sentenceEndCandidates.length > 0 ? Math.min(...sentenceEndCandidates) : -1;
-
-  const start = sentenceStart >= 0 ? sentenceStart + 1 : 0;
-  const end =
-    sentenceEnd >= 0
-      ? index + cleanSelection.length + sentenceEnd + 1
-      : Math.min(cleanText.length, index + cleanSelection.length + 160);
+  const protectedText = cleanText.replace(/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc)\.|\b(?:[A-Za-z]\.){2,}|\b[A-Z]\.(?=\s+[A-Z])|\d\.(?=\d)/g,
+    (match) => match.replace(/\./g, "\u0000"));
+  const boundaries = [0];
+  for (const match of protectedText.matchAll(/[.!?。！？]+["'”’)]*(?:\s+|$)/g)) {
+    boundaries.push(match.index! + match[0].length);
+  }
+  boundaries.push(cleanText.length);
+  const start = boundaries.filter((value) => value <= index).at(-1) ?? 0;
+  const end = boundaries.find((value) => value >= index + cleanSelection.length) ?? cleanText.length;
 
   return cleanText.slice(start, end).trim();
 }
-

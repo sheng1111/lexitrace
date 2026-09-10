@@ -19,6 +19,7 @@ import {
   type VocabularyMatcher
 } from "./matching";
 import styles from "./content.css?inline";
+import { locateReadingMark, type ReadingMark } from "./reading-marks";
 
 const ROOT_ATTRIBUTE = "data-lexitrace-root";
 const HIGHLIGHT_ATTRIBUTE = "data-lexitrace-highlight";
@@ -51,6 +52,192 @@ let recallAnchorRect: DOMRect | undefined;
 let extensionContextActive = true;
 let reviewPromptScheduled = false;
 let lookupRequestVersion = 0;
+const popupResizeObserver = new ResizeObserver(() => {
+  if (lookupPopup) positionPopupWithinViewport(lookupPopup, lookupAnchorRect);
+  if (recallPopup) positionPopupWithinViewport(recallPopup, recallAnchorRect);
+});
+const READING_MARK_PREFIX = "lexitrace.readingMark.";
+let readingMarks: ReadingMark[] = [];
+let readingMarkRefreshTimer: number | undefined;
+let readingMarkLauncher: HTMLButtonElement | undefined;
+
+function readingPageUrl(): string {
+  return location.href;
+}
+
+function readingTextSnapshot(): { text: string; nodes: Text[] } {
+  const nodes: Text[] = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => isInsideBlockedElement(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+  });
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  return { text: nodes.map((node) => node.data).join(""), nodes };
+}
+
+function renderReadingMarks(): void {
+  const api = CSS as unknown as { highlights?: Map<string, unknown> };
+  const HighlightClass = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+  if (!api.highlights || !HighlightClass || !document.body) return;
+  const snapshot = readingTextSnapshot();
+  const ranges: Range[] = [];
+  if (settings?.extensionEnabled) for (const mark of readingMarks.filter((item) => item.url === readingPageUrl())) {
+    const start = locateReadingMark(snapshot.text, mark);
+    if (start === undefined) continue;
+    const end = start + mark.text.length;
+    let offset = 0;
+    const range = document.createRange();
+    let started = false;
+    for (const node of snapshot.nodes) {
+      const next = offset + node.length;
+      if (!started && start < next) {
+        range.setStart(node, start - offset);
+        started = true;
+      }
+      if (started && end <= next) {
+        range.setEnd(node, end - offset);
+        ranges.push(range);
+        break;
+      }
+      offset = next;
+    }
+  }
+  api.highlights.set("lexitrace-reading", new HighlightClass(...ranges));
+  renderReadingMarkLauncher();
+}
+
+function renderReadingMarkLauncher(): void {
+  const count = readingMarks.filter((mark) => mark.url === readingPageUrl()).length;
+  if (!settings?.extensionEnabled || !count) {
+    readingMarkLauncher?.remove();
+    readingMarkLauncher = undefined;
+    return;
+  }
+  if (!readingMarkLauncher) {
+    readingMarkLauncher = createButton("");
+    readingMarkLauncher.classList.add("lexitrace-reading-launcher");
+    readingMarkLauncher.addEventListener("click", showReadingMarkLibrary);
+    appendToUiRoot(readingMarkLauncher);
+  }
+  readingMarkLauncher.textContent = `我的螢光筆 · ${count}`;
+}
+
+function showReadingMarkLibrary(): void {
+  closePopups();
+  const rect = readingMarkLauncher?.getBoundingClientRect() ?? new DOMRect(24, 80, 0, 0);
+  lookupAnchorRect = rect;
+  const popup = lookupPopup = createPopupShell(rect);
+  popup.setAttribute("aria-label", "本頁螢光標記收藏");
+  popup.append(createTextElement("h2", "lexitrace-popup__title", "本頁收藏"));
+  popup.append(createTextElement("p", "lexitrace-popup__meta", "標記會保留到你手動移除。選一句，開始聽寫或回想。"));
+  const marks = readingMarks.filter((item) => item.url === readingPageUrl());
+  if (!marks.length) popup.append(createTextElement("p", "lexitrace-popup__text", "還沒有標記，反白網頁文字即可收藏。"));
+  for (const item of marks) {
+    const card = createTextElement("section", "lexitrace-reading-card", "");
+    card.append(createTextElement("p", "lexitrace-popup__sentence", item.text));
+    const actions = createTextElement("div", "lexitrace-popup__actions", "");
+    const practice = createButton("聽寫練習", true);
+    practice.addEventListener("click", () => showSentenceDictation(item.text, rect));
+    const remove = createButton("移除");
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        await chrome.storage.local.remove(READING_MARK_PREFIX + item.id);
+        await loadReadingMarks();
+        if (lookupPopup === popup) showReadingMarkLibrary();
+      } catch {
+        remove.textContent = "移除失敗，重試";
+        remove.disabled = false;
+      }
+    });
+    actions.append(createSpeakButton(item.text), practice, remove);
+    card.append(actions);
+    popup.append(card);
+  }
+  const close = createButton("回到閱讀");
+  close.addEventListener("click", closePopups);
+  popup.append(close);
+  appendToUiRoot(popup);
+  positionPopupWithinViewport(popup, rect);
+}
+
+function showSentenceDictation(text: string, rect: DOMRect): void {
+  closePopups();
+  lookupAnchorRect = rect;
+  const popup = lookupPopup = createPopupShell(rect);
+  popup.setAttribute("aria-label", "句子聽寫練習");
+  popup.append(createTextElement("p", "lexitrace-popup__meta", "聽 → 寫 → 核對 → 再試一次"));
+  popup.append(createTextElement("h2", "lexitrace-popup__title", "聽完後，寫下你聽到的英文"));
+  popup.append(createTextElement("p", "lexitrace-popup__text", "可重播；先試著完成，再顯示原句。此練習不計入單字熟練度。"));
+  const speak = createSpeakButton(text);
+  speak.textContent = "播放 / 重播";
+  const label = createTextElement("label", "lexitrace-field", "你的聽寫答案");
+  const input = document.createElement("textarea");
+  input.className = "lexitrace-input";
+  input.rows = 4;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.placeholder = "Type what you hear…";
+  label.append(input);
+  const feedback = createTextElement("div", "lexitrace-popup__section", "");
+  feedback.setAttribute("role", "status");
+  const check = createButton("核對答案", true);
+  check.addEventListener("click", () => {
+    if (!input.value.trim()) {
+      feedback.textContent = "先輸入你聽到的內容；不確定的部分也可以試寫。";
+      input.focus();
+      return;
+    }
+    const normalize = (value: string) => value.toLowerCase().replace(/[’‘]/g, "'")
+      .replace(/[^a-z0-9'\s]/g, " ").replace(/\s+/g, " ").trim();
+    const correct = normalize(input.value) === normalize(text);
+    feedback.replaceChildren(createTextElement("p", "lexitrace-popup__text",
+      correct ? "文字一致！再朗讀一次，留意重音與節奏。" : "還有差異。對照原句，留意漏字、拼字與詞尾，再聽一次。"));
+    appendSentenceSection(feedback, "原句（核對忽略大小寫及一般標點）", text);
+  });
+  const retry = createButton("重新練習");
+  retry.addEventListener("click", () => {
+    input.value = "";
+    feedback.replaceChildren();
+    input.focus();
+  });
+  const back = createButton("我的收藏");
+  back.addEventListener("click", showReadingMarkLibrary);
+  const close = createButton("回到閱讀");
+  close.addEventListener("click", closePopups);
+  const actions = createTextElement("div", "lexitrace-popup__actions", "");
+  actions.append(check, retry, back, close);
+  popup.append(speak, label, feedback, actions);
+  appendToUiRoot(popup);
+  window.getSelection()?.removeAllRanges();
+  input.focus();
+  positionPopupWithinViewport(popup, rect);
+}
+
+async function loadReadingMarks(): Promise<void> {
+  const stored = await chrome.storage.local.get(null);
+  readingMarks = Object.entries(stored).filter(([key]) => key.startsWith(READING_MARK_PREFIX))
+    .map(([, value]) => value as ReadingMark);
+  renderReadingMarks();
+}
+
+function selectedReadingMark(range: Range): ReadingMark | undefined {
+  const snapshot = readingTextSnapshot();
+  let start = 0;
+  let found = false;
+  for (const node of snapshot.nodes) {
+    if (range.intersectsNode(node)) {
+      if (node === range.startContainer) start += range.startOffset;
+      found = true;
+      break;
+    }
+    start += node.length;
+  }
+  const text = range.toString();
+  if (!found || !text || snapshot.text.slice(start, start + text.length) !== text) return undefined;
+  return { id: crypto.randomUUID(), url: readingPageUrl(), text, start,
+    before: snapshot.text.slice(Math.max(0, start - 48), start),
+    after: snapshot.text.slice(start + text.length, start + text.length + 48) };
+}
 let highlightRefreshVersion = 0;
 let contentObserver: MutationObserver | undefined;
 let contentRefreshTimer: number | undefined;
@@ -82,6 +269,7 @@ async function boot(): Promise<void> {
   try {
     injectStyles();
     settings = await sendMessage({ type: "GET_SETTINGS" });
+    await loadReadingMarks();
 
     document.addEventListener("mouseup", handleSelectionEvent);
     document.addEventListener("keyup", handleSelectionEvent);
@@ -106,11 +294,15 @@ function handleStorageChange(
   changes: Record<string, chrome.storage.StorageChange>,
   areaName: string
 ): void {
+  if (areaName === "local" && Object.keys(changes).some((key) => key.startsWith(READING_MARK_PREFIX))) {
+    void loadReadingMarks().catch(handleRuntimeFailure);
+  }
   if (areaName !== "local" || !changes[SETTINGS_KEY]?.newValue) {
     return;
   }
 
   settings = changes[SETTINGS_KEY].newValue as ExtensionSettings;
+  renderReadingMarks();
   startContentObserver();
   void refreshHighlights().catch(handleRuntimeFailure);
 }
@@ -146,6 +338,8 @@ function hasRuntimeContext(): boolean {
 
 function shutdownInvalidatedContext(): void {
   extensionContextActive = false;
+  window.clearTimeout(readingMarkRefreshTimer);
+  (CSS as unknown as { highlights?: Map<string, unknown> }).highlights?.delete("lexitrace-reading");
   closePopups();
   removePageBubble();
   closeReviewPrompt();
@@ -199,6 +393,10 @@ function injectStyles(): void {
 }
 
 function handleSelectionEvent(event: MouseEvent | KeyboardEvent): void {
+  if (event instanceof KeyboardEvent && !(event.shiftKey && event.key.startsWith("Arrow"))) {
+    return;
+  }
+  if (event instanceof MouseEvent && event.button !== 0) return;
   if (!extensionContextActive || !settings?.extensionEnabled) {
     return;
   }
@@ -208,13 +406,14 @@ function handleSelectionEvent(event: MouseEvent | KeyboardEvent): void {
   }
 
   window.setTimeout(() => {
+    if (!extensionContextActive || !settings?.extensionEnabled) return;
     const payload = getSelectionPayload();
 
     if (!payload) {
       return;
     }
 
-    void showLookupPopup(payload).catch(handleRuntimeFailure);
+    showSelectionActions(payload);
   }, 0);
 }
 
@@ -256,6 +455,10 @@ function startContentObserver(): void {
   }
 
   contentObserver = new MutationObserver((mutations) => {
+    if (mutations.some(hasRelevantTextMutation)) {
+      window.clearTimeout(readingMarkRefreshTimer);
+      readingMarkRefreshTimer = window.setTimeout(renderReadingMarks, 500);
+    }
     if (
       suppressContentObserver ||
       hiddenHighlights ||
@@ -319,6 +522,7 @@ function getSelectionPayload():
       normalizedText: string;
       sourceSentence: string;
       rect: DOMRect;
+      range: Range;
     }
   | undefined {
   const selection = window.getSelection();
@@ -339,13 +543,20 @@ function getSelectionPayload():
     return undefined;
   }
 
-  const containerText = range.commonAncestorContainer.textContent ?? text;
+  const element = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer as Element : range.commonAncestorContainer.parentElement;
+  const container = element?.closest("p,li,blockquote,td,th,h1,h2,h3,h4,article,section") ?? element;
+  const prefix = document.createRange();
+  prefix.selectNodeContents(container ?? range.commonAncestorContainer);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const containerText = container?.textContent ?? text;
 
   return {
     text,
     normalizedText: normalizeText(text),
-    sourceSentence: extractSentenceAroundSelection(containerText, text),
-    rect
+    sourceSentence: extractSentenceAroundSelection(containerText, text, prefix.toString().length),
+    rect,
+    range: range.cloneRange()
   };
 }
 
@@ -355,10 +566,104 @@ function isReasonableEnglishSelection(text: string): boolean {
 
   return (
     words.length >= 1 &&
-    words.length <= 8 &&
-    normalized.length <= 96 &&
-    /^[A-Za-z][A-Za-z\s'-]*$/.test(normalized)
+    words.length <= 120 &&
+    normalized.length <= 1200 &&
+    /[A-Za-z]/.test(normalized)
   );
+}
+
+function showSelectionActions(payload: NonNullable<ReturnType<typeof getSelectionPayload>>): void {
+  closePopups();
+  lookupAnchorRect = payload.rect;
+  const popup = lookupPopup = createPopupShell(payload.rect);
+  popup.setAttribute("aria-label", "選取文字的操作");
+  const sentence = payload.text.split(/\s+/).length > 8 || /[.!?]/.test(payload.text);
+  popup.append(createTextElement("h2", "lexitrace-popup__title", sentence ? "句子學習" : "選取文字"));
+  popup.append(createTextElement("p", "lexitrace-popup__sentence", payload.text));
+  const actions = createTextElement("div", "lexitrace-popup__actions", "");
+  const candidate = selectedReadingMark(payload.range);
+  const snapshot = readingTextSnapshot();
+  let existing = candidate ? readingMarks.find((item) => item.url === candidate.url &&
+    item.text === candidate.text && locateReadingMark(snapshot.text, item) === candidate.start) : undefined;
+  const mark = createButton(existing ? "移除螢光標記" : "螢光標記（保留）");
+  mark.addEventListener("click", async () => {
+    const api = CSS as unknown as { highlights?: Map<string, unknown> };
+    const HighlightClass = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+    if (!api.highlights || !HighlightClass) {
+      mark.textContent = "此瀏覽器不支援螢光標記";
+      return;
+    }
+    if (!candidate) {
+      mark.textContent = "無法定位，請重新選取文字";
+      return;
+    }
+    mark.disabled = true;
+    try {
+      if (existing) {
+        await chrome.storage.local.remove(READING_MARK_PREFIX + existing.id);
+        existing = undefined;
+      } else {
+        await chrome.storage.local.set({ [READING_MARK_PREFIX + candidate.id]: candidate });
+        existing = candidate;
+      }
+      await loadReadingMarks();
+      mark.textContent = existing ? "移除螢光標記" : "螢光標記（保留）";
+    } catch {
+      mark.textContent = "儲存失敗，點此重試";
+    } finally {
+      mark.disabled = false;
+    }
+  });
+  actions.append(mark);
+  const clear = createButton("清除本頁全部螢光標記");
+  clear.addEventListener("click", async () => {
+    clear.disabled = true;
+    try {
+      await loadReadingMarks();
+      await chrome.storage.local.remove(readingMarks.filter((item) => item.url === readingPageUrl())
+        .map((item) => READING_MARK_PREFIX + item.id));
+      await loadReadingMarks();
+      existing = undefined;
+      mark.textContent = "螢光標記（保留）";
+      clear.textContent = "已清除本頁標記";
+    } catch {
+      clear.textContent = "清除失敗，點此重試";
+    } finally {
+      clear.disabled = false;
+    }
+  });
+  actions.append(clear);
+  if (!sentence) {
+    const lookup = createButton("查詢", true);
+    lookup.addEventListener("click", () => void showLookupPopup(payload).catch(handleRuntimeFailure));
+    actions.append(lookup);
+  } else {
+    actions.append(createSpeakButton(payload.text));
+    const dictation = createButton("聽寫練習");
+    dictation.addEventListener("click", () => showSentenceDictation(payload.text, payload.rect));
+    actions.append(dictation);
+    const practice = createButton("回想練習", true);
+    practice.addEventListener("click", () => {
+      popup.replaceChildren(createTextElement("h2", "lexitrace-popup__title", "試著用自己的話說出句意"));
+      popup.append(createTextElement("p", "lexitrace-popup__text", "先回想：誰做了什麼？時間、條件與轉折是什麼？再顯示原句核對。"));
+      const reveal = createButton("顯示原句核對", true);
+      reveal.addEventListener("click", () => {
+        appendSentenceSection(popup, "原句", payload.text);
+        popup.append(createSpeakButton(payload.text));
+        reveal.remove();
+      });
+      popup.append(reveal);
+      window.getSelection()?.removeAllRanges();
+    });
+    actions.append(practice);
+    popup.append(createTextElement("p", "lexitrace-popup__meta", "不懂的單字或片語可另外反白查詢；朗讀後試著跟讀一次。"));
+  }
+  const close = createButton("關閉");
+  close.addEventListener("click", closePopups);
+  actions.append(close);
+  popup.append(actions);
+  appendToUiRoot(popup);
+  positionPopupWithinViewport(popup, payload.rect);
 }
 
 function isInsideBlockedElement(node: Node): boolean {
@@ -1662,6 +1967,7 @@ function createPopupShell(rect: DOMRect): HTMLElement {
 
   popup.style.left = `${left}px`;
   popup.style.top = `${top}px`;
+  popupResizeObserver.observe(popup);
   return popup;
 }
 
@@ -1671,7 +1977,8 @@ function positionPopupWithinViewport(
 ): void {
   const margin = 12;
   const anchor = anchorRect ?? popup.getBoundingClientRect();
-  const popupRect = popup.getBoundingClientRect();
+  // Layout dimensions exclude the entrance animation's scale transform.
+  const popupRect = { width: popup.offsetWidth, height: popup.offsetHeight };
   const popupWidth = Math.min(popupRect.width || 440, window.innerWidth - margin * 2);
   const popupHeight = Math.min(
     popupRect.height || 360,
@@ -1769,6 +2076,7 @@ function createTextElement<K extends keyof HTMLElementTagNameMap>(
 }
 
 function closePopups(): void {
+  popupResizeObserver.disconnect();
   lookupRequestVersion += 1;
   removeWithExitAnimation(lookupPopup);
   removeWithExitAnimation(recallPopup);

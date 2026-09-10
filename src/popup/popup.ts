@@ -98,13 +98,25 @@ function renderDashboard(): void {
   actions.append(optionsButton);
 
   wrapper.append(header, intro, stats);
+  const learningPath = createElement("section", "learning-path");
+  learningPath.append(createText("h3", "learning-path__title", "今天怎麼學"));
+  const steps = [
+    ["01 · 先回想", due.length ? `${due.length} 個單字到期，先回想再揭曉答案。` : "沒有到期單字，可以先讀一小段英文。"],
+    ["02 · 帶著情境閱讀", "反白不熟悉的詞查詢；值得重讀的句子用螢光筆收藏。"],
+    ["03 · 聽寫一句", "到網頁右上「我的螢光筆」選一句，聽、寫、核對，再試一次。"]
+  ];
+  for (const [title, description] of steps) {
+    const step = createElement("div", "learning-path__step");
+    step.append(createText("strong", "", title), createText("p", "", description));
+    learningPath.append(step);
+  }
   if (due.length > 0) {
     wrapper.append(createDuePreview(due));
   }
   if (toeicPlan.queue.length > 0) {
     wrapper.append(createToeicFoundationCard(toeicPlan));
   }
-  wrapper.append(actions);
+  wrapper.append(actions, learningPath);
   root.replaceChildren(wrapper);
 }
 
