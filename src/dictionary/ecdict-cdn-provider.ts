@@ -39,11 +39,7 @@ export class EcdictCdnProvider implements DictionaryProvider {
       normalizedText: request.normalizedText,
       provider: "ecdict_cdn",
       partOfSpeech: normalizePartOfSpeech(entry.pos),
-      meaningZh: applyContextOverride(
-        request,
-        normalizeTranslation(entry.translation),
-        matched?.form
-      ),
+      meaningZh: normalizeTranslation(entry.translation),
       meaningEn: normalizeDefinition(entry.definition),
       pronunciation: entry.phonetic,
       sourceSentence: request.sourceSentence,
@@ -189,23 +185,4 @@ function createExternalUrl(text: string): string {
   return `https://www.oxfordlearnersdictionaries.com/search/english/?q=${encodeURIComponent(
     text
   )}`;
-}
-
-function applyContextOverride(
-  request: LookupRequest,
-  translation: string,
-  matchedForm?: string
-): string {
-  const haystack = `${request.normalizedText} ${request.sourceSentence}`.toLowerCase();
-
-  if (
-    (request.normalizedText === "resolution" ||
-      request.normalizedText === "resolutions" ||
-      matchedForm === "resolution") &&
-    /(new year|goal|goals|change|life)/.test(haystack)
-  ) {
-    return "決心；新年目標；下定決心要做的事";
-  }
-
-  return translation;
 }
