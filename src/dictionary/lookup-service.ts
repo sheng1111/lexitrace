@@ -6,6 +6,7 @@ import { GoogleTranslateProvider } from "./google-translate-provider";
 import { LocalDictionaryProvider } from "./local-provider";
 import { MyMemoryProvider } from "./mymemory-provider";
 import { WiktapiProvider } from "./wiktapi-provider";
+import { applyContextOverrides } from "./context-overrides";
 
 const ecdictProvider = new EcdictCdnProvider();
 const freeDictionaryProvider = new FreeDictionaryProvider();
@@ -27,7 +28,9 @@ export async function lookupWord(
     return cached;
   }
 
-  const lookupPromise = lookupWordWithoutCache(request, options);
+  const lookupPromise = lookupWordWithoutCache(request, options).then((result) =>
+    applyContextOverrides(request, result)
+  );
   lookupCache.set(cacheKey, lookupPromise);
   return lookupPromise;
 }
@@ -122,10 +125,13 @@ function createCacheKey(
   request: LookupRequest,
   options: { useUnofficialGoogleTranslate?: boolean }
 ): string {
-  return [
+  return JSON.stringify([
     options.useUnofficialGoogleTranslate ? "google_unofficial" : "standard",
     request.normalizedText,
     request.domain,
-    request.sourceSentence.slice(0, 160)
-  ].join("|");
+    request.sourceSentence,
+    request.pageTitle,
+    request.pageUrl,
+    request.selectedText
+  ]);
 }

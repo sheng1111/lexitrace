@@ -78,6 +78,29 @@ Experimental opt-in:
 
 - **Unofficial Google Translate endpoint**: disabled by default. When enabled in Settings, Chinese meanings are prioritized from `translate.googleapis.com`. This is not an official public API and may break or be limited, so it is intended for self-use only.
 
+### Contextual sense selection and saved data
+
+Provider order chooses the base result; lightweight local rules in
+`src/dictionary/context-overrides.ts` select known contextual senses **after**
+merging all providers, including opt-in Google and MyMemory translations.
+No additional network request or language model is used. For example,
+“Google shipped a new model” means “已推出；已發布”, while “The package shipped
+yesterday” keeps “已出貨；已寄送”, even on a technology news website. Physical
+goods take precedence. A short “Google shipped” fragment requires a recognized
+technology domain and company. Ambiguous fragments keep the dictionary meaning;
+these conservative rules are not a general sentence parser.
+
+Lookup promises are cached in service-worker memory by the full sentence,
+page metadata, selected text and translation option. Reloading the extension
+clears the old in-memory cache; there is no persistent lookup cache to migrate.
+
+This change does not retranslate existing IndexedDB records or Google Sheet rows.
+Sheets still merges saved records by its existing timestamp/content conflict
+rules, with the same schema. To correct an older saved meaning, use the existing
+manual vocabulary editor and then sync. Explicitly saving a new lookup of an
+existing word follows the existing update behavior and can replace its meaning
+and source context; learning counters and notes follow the existing storage rules.
+
 ## Learning Design
 
 LexiTrace is designed around a few practical language-learning ideas:

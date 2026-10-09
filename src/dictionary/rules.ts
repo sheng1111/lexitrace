@@ -15,7 +15,8 @@ const TECHNICAL_DOMAINS = [
   "npmjs.com",
   "cloud.google.com",
   "docs.aws.amazon.com",
-  "learn.microsoft.com"
+  "learn.microsoft.com",
+  "smol.ai"
 ];
 
 const TECHNICAL_KEYWORDS = [
@@ -25,8 +26,13 @@ const TECHNICAL_KEYWORDS = [
   "runtime",
   "server",
   "deploy",
-  "package",
-  "repository"
+  "repository",
+  "software",
+  "model",
+  "models",
+  "feature",
+  "features",
+  "software package"
 ];
 
 const BUSINESS_KEYWORDS = [
@@ -36,9 +42,16 @@ const BUSINESS_KEYWORDS = [
   "announcement",
   "customer",
   "shipping",
+  "shipped",
+  "shipment",
+  "package",
+  "parcel",
   "refund",
   "schedule"
 ];
+
+const TECHNICAL_PATTERN = keywordPattern(TECHNICAL_KEYWORDS);
+const BUSINESS_PATTERN = keywordPattern(BUSINESS_KEYWORDS);
 
 export function classifyToeicUsefulness(
   normalizedText: string,
@@ -82,13 +95,13 @@ export function classifyContext(input: {
     .toLowerCase();
 
   if (
-    TECHNICAL_DOMAINS.some((domain) => input.domain.endsWith(domain)) ||
-    TECHNICAL_KEYWORDS.some((keyword) => haystack.includes(keyword))
+    isTechnicalDomain(input.domain) ||
+    TECHNICAL_PATTERN.test(haystack)
   ) {
     return "Technical";
   }
 
-  if (BUSINESS_KEYWORDS.some((keyword) => haystack.includes(keyword))) {
+  if (BUSINESS_PATTERN.test(haystack)) {
     return "Business";
   }
 
@@ -97,4 +110,15 @@ export function classifyContext(input: {
   }
 
   return "Unknown";
+}
+
+export function isTechnicalDomain(domain: string): boolean {
+  const hostname = domain.toLowerCase();
+  return TECHNICAL_DOMAINS.some(
+    (known) => hostname === known || hostname.endsWith(`.${known}`)
+  );
+}
+
+function keywordPattern(keywords: string[]): RegExp {
+  return new RegExp(`\\b(?:${keywords.join("|")})\\b`);
 }

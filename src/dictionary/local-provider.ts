@@ -1,6 +1,7 @@
 import type { LookupRequest, LookupResult } from "../core/types";
 import type { DictionaryProvider } from "./provider";
 import { classifyContext, classifyToeicUsefulness } from "./rules";
+import { getLookupForms } from "./word-forms";
 
 interface LocalDictionaryEntry {
   partOfSpeech?: string;
@@ -175,6 +176,11 @@ const LOCAL_DICTIONARY: Record<string, LocalDictionaryEntry> = {
     meaningZh: "出貨；貨運",
     meaningEn: "goods being sent or delivered"
   },
+  ship: {
+    partOfSpeech: "verb",
+    meaningZh: "運送；出貨",
+    meaningEn: "send or transport goods"
+  },
   sufficient: {
     partOfSpeech: "adjective",
     meaningZh: "足夠的；充分的",
@@ -194,7 +200,11 @@ const LOCAL_DICTIONARY: Record<string, LocalDictionaryEntry> = {
 
 export class LocalDictionaryProvider implements DictionaryProvider {
   async lookup(request: LookupRequest): Promise<LookupResult> {
-    const entry = LOCAL_DICTIONARY[request.normalizedText];
+    // Keep existing exact matches; support ship inflections for offline lookup.
+    const entry = LOCAL_DICTIONARY[request.normalizedText] ??
+      (getLookupForms(request.normalizedText).includes("ship")
+        ? LOCAL_DICTIONARY.ship
+        : undefined);
     const externalUrl = `https://www.oxfordlearnersdictionaries.com/search/english/?q=${encodeURIComponent(
       request.selectedText
     )}`;
